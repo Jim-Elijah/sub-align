@@ -14,7 +14,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Align LRC/SRT subtitles to audio/video with WhisperX forced alignment.",
     )
     parser.add_argument("media", type=Path, help="Audio or video file")
-    parser.add_argument("subtitle", type=Path, help="Subtitle file (.srt or .lrc)")
+    parser.add_argument("subtitle", type=Path, help="Subtitle file (.srt, .lrc, or .txt)")
     parser.add_argument(
         "-o",
         "--output",

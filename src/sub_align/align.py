@@ -5,7 +5,7 @@ from pathlib import Path
 
 from sub_align.audio import audio_duration, load_audio
 from sub_align.device import default_compute_type, resolve_device
-from sub_align.formats import lrc, srt
+from sub_align.formats import lrc, srt, txt
 from sub_align.models import Cue
 from sub_align.vad import detect_speech_spans
 from sub_align.windows import assign_windows
@@ -25,6 +25,8 @@ def _read_cues(
         return srt.load(path)
     if suffix == ".lrc":
         return lrc.load(path, audio_duration=audio_duration)
+    if suffix == ".txt":
+        return txt.load(path)
     raise ValueError(f"Unsupported subtitle format: {suffix}")
 
 
@@ -229,10 +231,15 @@ def align_file(
     if language is None and not detect_language:
         raise ValueError("Provide --language or set detect_language=True")
 
+    is_plain_text = subtitle_path.suffix.lower() == ".txt"
+    if is_plain_text and mode == "refine":
+        raise ValueError("Plain text input has no timestamps; use realign mode instead of refine")
+    if is_plain_text:
+        mode = "realign"
+
     out_path = Path(output) if output else _default_output(subtitle_path)
     if out_path.suffix.lower() not in {".srt", ".lrc"}:
-        # Keep original format when output path omits extension
-        out_path = out_path.with_suffix(subtitle_path.suffix)
+        out_path = out_path.with_suffix(".srt")
 
     resolved = resolve_device(device)
     ctype = default_compute_type(resolved, compute_type)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from sub_align.audio import audio_duration, load_audio
@@ -13,6 +14,21 @@ from sub_align.windows import assign_windows
 # WhisperX may split one input cue into multiple sentence segments; remap via
 # alphanumeric tokens so contractions like "I'm" stay consistent across sides.
 _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+_MIN_WINDOW = 0.1
+# Floor for .txt ASR search windows so short lines are not force-aligned alone
+# inside a near-zero span.
+_MIN_SEARCH_DURATION = 0.5
+# Filled / oversized search windows longer than this are narrowed onto VAD
+# speech so forced alignment does not dump a short cue at the next utterance.
+_MAX_SEARCH_WINDOW = 4.0
+# Ignore speech islands that only touch the right edge of a fill gap (usually
+# the start of the next matched cue).
+_GAP_EDGE_GUARD = 0.5
+# Cues at or below this token count are temporarily merged with neighbors for
+# WhisperX alignment, then split back via word remapping.
+_SHORT_CUE_TOKENS = 3
+# Aligned cue shorter than this is treated as failed and repaired from windows.
+_MIN_ALIGNED_DURATION = 0.05
 
 
 def _read_cues(
@@ -57,6 +73,497 @@ def _alnum_tokens(text: str) -> list[str]:
     return _TOKEN_RE.findall(text.lower())
 
 
+def _timed_asr_tokens(
+    segments: list[dict],
+) -> list[tuple[str, float, float]]:
+    """
+    Flatten transcription segments into (token, start, end).
+
+    Prefer per-word times when present (from a prior WhisperX align pass).
+    Otherwise interpolate evenly across each segment — inaccurate for long
+    multi-sentence ASR blobs that include pauses.
+    """
+    stream: list[tuple[str, float, float]] = []
+    for segment in segments:
+        text = str(segment.get("text") or "")
+        tokens = _alnum_tokens(text)
+        if not tokens:
+            continue
+        start_raw = segment.get("start")
+        end_raw = segment.get("end")
+        if start_raw is None or end_raw is None:
+            continue
+        start = float(start_raw)
+        end = float(end_raw)
+        if end < start:
+            end = start
+        words = segment.get("words")
+        if words:
+            for word in words:
+                raw = str(word.get("word", ""))
+                sub = _alnum_tokens(raw)
+                if not sub:
+                    continue
+                w_start = word.get("start")
+                w_end = word.get("end")
+                if w_start is None or w_end is None:
+                    continue
+                t0, t1 = float(w_start), float(w_end)
+                if t1 < t0:
+                    t1 = t0
+                for token in sub:
+                    stream.append((token, t0, t1))
+            continue
+        duration = end - start
+        n = len(tokens)
+        for i, token in enumerate(tokens):
+            t0 = start + duration * i / n
+            t1 = start + duration * (i + 1) / n
+            stream.append((token, t0, t1))
+    return stream
+
+
+def _segments_with_word_times(
+    asr_segments: list[dict],
+    align_result: dict,
+) -> list[dict]:
+    """
+    Prefer WhisperX-aligned ASR segments that carry per-word timestamps.
+
+    Falls back to the original ASR segments when alignment produced no words
+    (even interpolation in ``_timed_asr_tokens`` still applies).
+    """
+    aligned = align_result.get("segments") or []
+    if any(seg.get("words") for seg in aligned):
+        return aligned
+    word_segments = align_result.get("word_segments") or []
+    if not word_segments or not asr_segments:
+        return asr_segments
+    # Flat word list only: attach as one synthetic segment spanning ASR bounds.
+    starts = [float(w["start"]) for w in word_segments if w.get("start") is not None]
+    ends = [float(w["end"]) for w in word_segments if w.get("end") is not None]
+    if not starts or not ends:
+        return asr_segments
+    text = " ".join(str(w.get("word", "")) for w in word_segments).strip()
+    return [
+        {
+            "text": text or str(asr_segments[0].get("text") or ""),
+            "start": min(starts),
+            "end": max(ends),
+            "words": word_segments,
+        }
+    ]
+
+
+def _cover_cue(
+    starts: list[float | None],
+    ends: list[float | None],
+    cue_i: int,
+    t0: float,
+    t1: float,
+) -> None:
+    prev_start = starts[cue_i]
+    prev_end = ends[cue_i]
+    starts[cue_i] = t0 if prev_start is None else min(prev_start, t0)
+    ends[cue_i] = t1 if prev_end is None else max(prev_end, t1)
+
+
+def _assign_windows_from_asr(
+    cues: list[Cue],
+    asr_tokens: list[tuple[str, float, float]],
+) -> list[tuple[float | None, float | None]]:
+    """
+    Map ASR timed tokens onto cues via SequenceMatcher.
+
+    Equal spans match 1:1. Replace spans share the ASR time range across the
+    involved cues (handles Alright vs All right). Unmatched cues stay None.
+    """
+    if not cues:
+        return []
+    cue_toks: list[tuple[int, str]] = []
+    for i, cue in enumerate(cues):
+        for token in _alnum_tokens(cue.text):
+            cue_toks.append((i, token))
+
+    starts: list[float | None] = [None] * len(cues)
+    ends: list[float | None] = [None] * len(cues)
+    if not cue_toks or not asr_tokens:
+        return list(zip(starts, ends, strict=True))
+
+    cue_only = [t for _, t in cue_toks]
+    asr_only = [t for t, _, _ in asr_tokens]
+    matcher = SequenceMatcher(a=cue_only, b=asr_only, autojunk=False)
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            for offset in range(i2 - i1):
+                cue_i, _ = cue_toks[i1 + offset]
+                _, t0, t1 = asr_tokens[j1 + offset]
+                _cover_cue(starts, ends, cue_i, t0, t1)
+            continue
+        if tag != "replace" or j1 >= j2 or i1 >= i2:
+            continue
+        span_start = min(t0 for _, t0, _ in asr_tokens[j1:j2])
+        span_end = max(t1 for _, _, t1 in asr_tokens[j1:j2])
+        # Distribute replace-span time across cues by their token counts.
+        counts: dict[int, int] = {}
+        order: list[int] = []
+        for idx in range(i1, i2):
+            cue_i, _ = cue_toks[idx]
+            if cue_i not in counts:
+                order.append(cue_i)
+                counts[cue_i] = 0
+            counts[cue_i] += 1
+        total = float(sum(counts.values()))
+        if total <= 0:
+            continue
+        cursor = span_start
+        span = span_end - span_start
+        for cue_i in order:
+            share = span * (counts[cue_i] / total)
+            t0 = cursor
+            t1 = cursor + share
+            cursor = t1
+            _cover_cue(starts, ends, cue_i, t0, t1)
+
+    return list(zip(starts, ends, strict=True))
+
+
+def _fill_missing_windows(
+    windows: list[tuple[float | None, float | None]],
+    *,
+    audio_duration: float | None,
+) -> list[tuple[float, float]]:
+    """Interpolate None windows from neighbors; fall back to full audio."""
+    n = len(windows)
+    if n == 0:
+        return []
+    duration = audio_duration if audio_duration is not None and audio_duration > 0 else None
+    filled: list[tuple[float | None, float | None]] = list(windows)
+
+    # Forward fill starts from previous end; backward fill ends from next start.
+    last_end: float | None = 0.0 if duration is not None else None
+    for i in range(n):
+        start, end = filled[i]
+        if start is None and last_end is not None:
+            start = last_end
+        if end is None and start is not None:
+            # Peek ahead for a known start.
+            next_start = None
+            for j in range(i + 1, n):
+                if filled[j][0] is not None:
+                    next_start = filled[j][0]
+                    break
+            if next_start is not None:
+                end = next_start
+            elif duration is not None:
+                end = duration
+            else:
+                end = start + _MIN_WINDOW
+        if start is not None and end is not None and end < start:
+            end = start + _MIN_WINDOW
+        filled[i] = (start, end)
+        if end is not None:
+            last_end = end
+
+    # Backward pass for still-missing starts.
+    next_start: float | None = duration
+    for i in range(n - 1, -1, -1):
+        start, end = filled[i]
+        if end is None and next_start is not None:
+            end = next_start
+        if start is None and end is not None:
+            prev_end = None
+            for j in range(i - 1, -1, -1):
+                if filled[j][1] is not None:
+                    prev_end = filled[j][1]
+                    break
+            start = prev_end if prev_end is not None else max(0.0, end - _MIN_WINDOW)
+        if start is not None and end is not None and end < start:
+            start = max(0.0, end - _MIN_WINDOW)
+        filled[i] = (start, end)
+        if start is not None:
+            next_start = start
+
+    result: list[tuple[float, float]] = []
+    for i, (start, end) in enumerate(filled):
+        if start is None or end is None:
+            # Last resort: proportional slice of audio / unit interval.
+            total = duration if duration is not None else float(max(n, 1))
+            start = total * i / n
+            end = total * (i + 1) / n
+        if end < start + _MIN_WINDOW:
+            end = start + _MIN_WINDOW
+            if duration is not None:
+                end = min(end, duration)
+                if end < start:
+                    start = end
+        result.append((start, end))
+    return result
+
+
+def _enforce_min_windows(
+    windows: list[tuple[float, float]],
+    *,
+    min_duration: float,
+    audio_duration: float | None,
+) -> list[tuple[float, float]]:
+    """Expand windows shorter than ``min_duration`` into neighboring gaps."""
+    if not windows or min_duration <= 0:
+        return windows
+    n = len(windows)
+    out = list(windows)
+    limit = audio_duration if audio_duration is not None and audio_duration > 0 else None
+
+    for i in range(n):
+        start, end = out[i]
+        if end - start >= min_duration:
+            continue
+        need = min_duration - (end - start)
+        next_start = out[i + 1][0] if i + 1 < n else (limit if limit is not None else end + need)
+        room_right = max(0.0, next_start - end)
+        take = min(need, room_right)
+        end += take
+        need -= take
+        if need > 0:
+            prev_end = out[i - 1][1] if i > 0 else 0.0
+            room_left = max(0.0, start - prev_end)
+            take = min(need, room_left)
+            start -= take
+            need -= take
+        if need > 0:
+            end += need
+            if limit is not None:
+                end = min(end, limit)
+                if end < start + min_duration:
+                    start = max(0.0, end - min_duration)
+        if end < start:
+            end = start
+        out[i] = (start, end)
+    return out
+
+
+def _clip_speech_spans(
+    spans: list[tuple[float, float]],
+    lo: float,
+    hi: float,
+) -> list[tuple[float, float]]:
+    """Return speech spans clipped to ``[lo, hi]``, dropping empty leftovers."""
+    if hi <= lo or not spans:
+        return []
+    clipped: list[tuple[float, float]] = []
+    for start, end in spans:
+        a = max(start, lo)
+        b = min(end, hi)
+        if b - a >= _MIN_WINDOW:
+            clipped.append((a, b))
+    return clipped
+
+
+def _proportion_on_speech(
+    cues: list[Cue],
+    speech_spans: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """Map cues onto speech spans by text-length weight (same idea as realign)."""
+    segments = assign_windows(
+        cues,
+        mode="realign",
+        margin=0.0,
+        speech_spans=speech_spans,
+    )
+    return [(float(s["start"]), float(s["end"])) for s in segments]
+
+
+def _gap_speech_islands(
+    speech_spans: list[tuple[float, float]],
+    gap_start: float,
+    gap_end: float,
+    *,
+    edge_guard: float = _GAP_EDGE_GUARD,
+) -> list[tuple[float, float]]:
+    """
+    Speech inside a fill gap, preferring islands that are not just the next cue.
+
+    Islands that only begin within ``edge_guard`` of ``gap_end`` are dropped so
+    a missing middle line does not search on the following utterance.
+    """
+    islands = _clip_speech_spans(speech_spans, gap_start, gap_end)
+    if not islands:
+        return []
+    interior = [sp for sp in islands if sp[0] < gap_end - edge_guard]
+    return interior or islands
+
+
+def _windows_for_unmatched_run(
+    cues: list[Cue],
+    gap_start: float,
+    gap_end: float,
+    speech_spans: list[tuple[float, float]],
+) -> list[tuple[float, float]] | None:
+    """Place unmatched cues on VAD speech inside their fill gap."""
+    islands = _gap_speech_islands(speech_spans, gap_start, gap_end)
+    if not islands:
+        return None
+    if len(cues) == 1:
+        # One cue + several islands: pick the longest interior island so the
+        # phrase is not stretched across silence into the next line.
+        best = max(islands, key=lambda sp: sp[1] - sp[0])
+        return [best]
+    return _proportion_on_speech(cues, islands)
+
+
+def _refine_windows_with_speech(
+    rough: list[tuple[float | None, float | None]],
+    filled: list[tuple[float, float]],
+    cues: list[Cue],
+    speech_spans: list[tuple[float, float]],
+    *,
+    max_search_window: float = _MAX_SEARCH_WINDOW,
+) -> list[tuple[float, float]]:
+    """
+    Narrow ASR fill / oversized windows onto VAD speech.
+
+    Unmatched runs (rough times were None) are remapped onto speech islands
+    inside their neighbor gap. Matched windows longer than ``max_search_window``
+    are clipped to overlapping speech when available.
+    """
+    if not filled or not speech_spans:
+        return filled
+    n = len(filled)
+    out = list(filled)
+    unmatched = [start is None and end is None for start, end in rough]
+
+    i = 0
+    while i < n:
+        if not unmatched[i]:
+            start, end = out[i]
+            if end - start > max_search_window:
+                islands = _clip_speech_spans(speech_spans, start, end)
+                if islands:
+                    # Keep chronological coverage but drop long silence holes.
+                    out[i] = (islands[0][0], islands[-1][1])
+            i += 1
+            continue
+
+        j = i
+        while j < n and unmatched[j]:
+            j += 1
+        gap_start = out[i][0]
+        gap_end = out[j - 1][1]
+        remapped = _windows_for_unmatched_run(cues[i:j], gap_start, gap_end, speech_spans)
+        if remapped is not None and len(remapped) == j - i:
+            for offset, window in enumerate(remapped):
+                out[i + offset] = window
+        i = j
+    return out
+
+
+def build_script_align_segments(
+    cues: list[Cue],
+    transcription_segments: list[dict],
+    *,
+    margin: float = 0.5,
+    audio_duration: float | None = None,
+    min_search_duration: float = _MIN_SEARCH_DURATION,
+    speech_spans: list[tuple[float, float]] | None = None,
+) -> list[dict]:
+    """
+    Build WhisperX segments from script cues + ASR-derived search windows.
+
+    Transcription is used only for timing anchors. Segment text is always the
+    original cue text so forced alignment follows the subtitle, not ASR wording.
+    When ``speech_spans`` is provided, unmatched / oversized fill windows are
+    narrowed onto VAD speech so short cues are not force-aligned at the next
+    utterance after a long silence.
+    """
+    asr_tokens = _timed_asr_tokens(transcription_segments)
+    rough = _assign_windows_from_asr(cues, asr_tokens)
+    windows = _fill_missing_windows(rough, audio_duration=audio_duration)
+    if speech_spans:
+        windows = _refine_windows_with_speech(rough, windows, cues, speech_spans)
+    windows = _enforce_min_windows(
+        windows,
+        min_duration=min_search_duration,
+        audio_duration=audio_duration,
+    )
+
+    segments: list[dict] = []
+    for cue, (start, end) in zip(cues, windows, strict=True):
+        win_start = max(0.0, start - margin)
+        win_end = end + margin
+        if audio_duration is not None:
+            win_end = min(win_end, audio_duration)
+        if win_end < win_start + _MIN_WINDOW:
+            win_end = win_start + _MIN_WINDOW
+            if audio_duration is not None:
+                win_end = min(win_end, audio_duration)
+                if win_end < win_start:
+                    win_start = win_end
+        segments.append({"text": cue.text, "start": win_start, "end": win_end})
+    return segments
+
+
+def _group_short_cues(
+    cues: list[Cue],
+    *,
+    max_tokens: int = _SHORT_CUE_TOKENS,
+) -> list[list[int]]:
+    """
+    Group cue indices for temporary merge.
+
+    Short cues attach to the previous group when possible; leading shorts absorb
+    the following cue so they are never aligned alone.
+    """
+    n = len(cues)
+    if n == 0:
+        return []
+    short = [len(_alnum_tokens(c.text)) <= max_tokens for c in cues]
+    groups: list[list[int]] = []
+    i = 0
+    while i < n:
+        if not short[i]:
+            groups.append([i])
+            i += 1
+            continue
+        if groups:
+            groups[-1].append(i)
+            i += 1
+            continue
+        group = [i]
+        i += 1
+        while i < n and short[i]:
+            group.append(i)
+            i += 1
+        if i < n:
+            group.append(i)
+            i += 1
+        groups.append(group)
+    return groups
+
+
+def _merge_align_segments(
+    cues: list[Cue],
+    segments: list[dict],
+    *,
+    max_tokens: int = _SHORT_CUE_TOKENS,
+) -> tuple[list[dict], list[list[int]]]:
+    """Merge short-cue segments for WhisperX; return (merged, groups)."""
+    groups = _group_short_cues(cues, max_tokens=max_tokens)
+    if all(len(g) == 1 for g in groups):
+        return segments, groups
+
+    merged: list[dict] = []
+    for group in groups:
+        parts = [segments[i] for i in group]
+        text = " ".join(cues[i].text for i in group)
+        start = min(float(p["start"]) for p in parts)
+        end = max(float(p["end"]) for p in parts)
+        if end < start + _MIN_WINDOW:
+            end = start + _MIN_WINDOW
+        merged.append({"text": text, "start": start, "end": end})
+    return merged, groups
+
+
 def _collect_words(
     aligned_segments: list[dict],
     word_segments: list[dict] | None,
@@ -86,21 +593,32 @@ def _word_time_stream(words: list[dict]) -> list[tuple[str, float | None, float 
     return stream
 
 
-def _apply_from_words(cues: list[Cue], words: list[dict]) -> list[Cue] | None:
-    """Map cues onto aligner words in order. Returns None if words are unusable."""
+def _apply_from_words(
+    cues: list[Cue],
+    words: list[dict],
+) -> tuple[list[Cue], list[bool]] | None:
+    """
+    Map cues onto aligner words in order.
+
+    Returns (cues, exact_flags) or None if words are unusable. ``exact_flags[i]``
+    is False when cue i fell back to count-based consumption after a token mismatch.
+    """
     stream = _word_time_stream(words)
     if not stream:
         return None
 
     updated: list[Cue] = []
+    exact_flags: list[bool] = []
     idx = 0
     for cue in cues:
         need = _alnum_tokens(cue.text)
         if not need:
             updated.append(cue)
+            exact_flags.append(True)
             continue
         if idx >= len(stream):
             updated.append(cue)
+            exact_flags.append(False)
             continue
 
         start_idx = idx
@@ -118,7 +636,8 @@ def _apply_from_words(cues: list[Cue], words: list[dict]) -> list[Cue] | None:
             matched += 1
             idx += 1
 
-        if matched != len(need):
+        exact = matched == len(need)
+        if not exact:
             # Token text drifted; still consume by count to keep cue boundaries.
             idx = start_idx
             starts = []
@@ -135,13 +654,15 @@ def _apply_from_words(cues: list[Cue], words: list[dict]) -> list[Cue] | None:
 
         if not starts or not ends:
             updated.append(cue)
+            exact_flags.append(False)
             continue
         start = min(starts)
         end = max(ends)
         if end < start:
             end = start
         updated.append(Cue(index=cue.index, text=cue.text, start=start, end=end))
-    return updated
+        exact_flags.append(exact)
+    return updated, exact_flags
 
 
 def _apply_one_to_one(cues: list[Cue], aligned_segments: list[dict]) -> list[Cue]:
@@ -159,40 +680,199 @@ def _apply_one_to_one(cues: list[Cue], aligned_segments: list[dict]) -> list[Cue
     return updated
 
 
+def _apply_groups_proportional(
+    cues: list[Cue],
+    aligned_segments: list[dict],
+    groups: list[list[int]],
+) -> list[Cue]:
+    """Split each merged segment's time across its cues by token weight."""
+    by_index: dict[int, Cue] = {c.index: c for c in cues}
+    times: dict[int, tuple[float, float]] = {}
+    for seg, group in zip(aligned_segments, groups, strict=False):
+        seg_start = float(seg.get("start", 0.0))
+        seg_end = float(seg.get("end", seg_start))
+        if seg_end < seg_start:
+            seg_end = seg_start
+        weights = [max(len(_alnum_tokens(cues[i].text)), 1) for i in group]
+        total = float(sum(weights))
+        cursor = seg_start
+        span = seg_end - seg_start
+        for j, cue_i in enumerate(group):
+            share = span * (weights[j] / total) if total else span / max(len(group), 1)
+            t0 = cursor
+            t1 = cursor + share if j < len(group) - 1 else seg_end
+            cursor = t1
+            times[cue_i] = (t0, t1)
+
+    updated: list[Cue] = []
+    for i, cue in enumerate(cues):
+        if i in times:
+            start, end = times[i]
+            updated.append(Cue(index=cue.index, text=cue.text, start=start, end=end))
+        else:
+            updated.append(by_index.get(cue.index, cue))
+    return updated
+
+
+def _cue_window_fallback(
+    cues: list[Cue],
+    search_segments: list[dict],
+) -> list[tuple[float, float]]:
+    """Per-cue fallback times from unmerged search windows."""
+    out: list[tuple[float, float]] = []
+    for i, cue in enumerate(cues):
+        if i < len(search_segments):
+            start = float(search_segments[i].get("start", cue.start))
+            end = float(search_segments[i].get("end", cue.end))
+        else:
+            start, end = cue.start, cue.end
+        if end < start:
+            end = start
+        out.append((start, end))
+    return out
+
+
+def _repair_thin_cues(
+    aligned: list[Cue],
+    *,
+    exact_flags: list[bool],
+    fallback_windows: list[tuple[float, float]],
+) -> list[Cue]:
+    """
+    Replace failed / tiny alignments with search-window fallbacks.
+
+    A cue is repaired when its duration is below ``_MIN_ALIGNED_DURATION``, or
+    when token matching fell back to count-based consume and the span is still
+    shorter than the search window floor.
+    """
+    updated: list[Cue] = []
+    for i, cue in enumerate(aligned):
+        dur = cue.end - cue.start
+        exact = exact_flags[i] if i < len(exact_flags) else True
+        fb_start, fb_end = fallback_windows[i]
+        if fb_end < fb_start:
+            fb_end = fb_start
+        thin = dur < _MIN_ALIGNED_DURATION
+        weak = (not exact) and dur < _MIN_SEARCH_DURATION
+        if thin or weak:
+            updated.append(Cue(index=cue.index, text=cue.text, start=fb_start, end=fb_end))
+        else:
+            updated.append(cue)
+    return updated
+
+
 def _apply_aligned_times(
     cues: list[Cue],
     aligned_segments: list[dict],
     word_segments: list[dict] | None = None,
+    *,
+    search_segments: list[dict] | None = None,
+    groups: list[list[int]] | None = None,
 ) -> list[Cue]:
     """
     Apply WhisperX alignment times back onto original cues.
 
     WhisperX splits multi-sentence cues into separate segments, so index-aligned
-    mapping is wrong. Prefer word-level remapping; fall back to 1:1 when words
-    are unavailable (e.g. mocks).
+    mapping is wrong. Prefer word-level remapping; fall back to 1:1 (or group
+    proportional split) when words are unavailable (e.g. mocks).
     """
+    fallback_src = search_segments if search_segments is not None else []
+    if not fallback_src and groups is None:
+        fallback_src = aligned_segments
+    fallback_windows = (
+        _cue_window_fallback(cues, fallback_src)
+        if fallback_src
+        else [(c.start, c.end) for c in cues]
+    )
+
     words = _collect_words(aligned_segments, word_segments)
     if words:
         remapped = _apply_from_words(cues, words)
         if remapped is not None:
-            return remapped
+            updated, exact_flags = remapped
+            return _repair_thin_cues(
+                updated,
+                exact_flags=exact_flags,
+                fallback_windows=fallback_windows,
+            )
+
+    if groups is not None and any(len(g) > 1 for g in groups):
+        return _apply_groups_proportional(cues, aligned_segments, groups)
     return _apply_one_to_one(cues, aligned_segments)
 
 
 def _trim_overlaps(cues: list[Cue]) -> list[Cue]:
     """
-    Resolve adjacent overlaps by shortening the earlier cue only.
+    Enforce a non-overlapping, start-monotonic timeline.
 
-    If cue N ends after cue N+1 starts, set end_N = start_{N+1}. Never moves
-    starts; if that would make end < start, clamp end to start.
+    Normal overlap (start_N <= start_{N+1} < end_N): shorten end_N to
+    start_{N+1}. Inversion (start_{N+1} < start_N): advance start_{N+1} to
+    end_N (after ensuring end_N >= start_N). Never leaves a later cue starting
+    before an earlier cue.
     """
     if len(cues) < 2:
         return cues
+
+    updated = [
+        Cue(
+            index=c.index,
+            text=c.text,
+            start=c.start,
+            end=c.end if c.end >= c.start else c.start,
+        )
+        for c in cues
+    ]
+
+    for i in range(len(updated) - 1):
+        cur = updated[i]
+        nxt = updated[i + 1]
+        if cur.end <= nxt.start:
+            continue
+        if cur.start <= nxt.start:
+            new_end = nxt.start
+            if new_end < cur.start:
+                new_end = cur.start
+            if new_end != cur.end:
+                updated[i] = Cue(index=cur.index, text=cur.text, start=cur.start, end=new_end)
+            continue
+        # Inversion: later cue starts before earlier cue.
+        new_start = cur.end if cur.end >= cur.start else cur.start
+        new_end = nxt.end if nxt.end >= new_start else new_start
+        updated[i + 1] = Cue(index=nxt.index, text=nxt.text, start=new_start, end=new_end)
+        # Earlier cue may still extend past the new boundary.
+        if updated[i].end > new_start:
+            updated[i] = Cue(
+                index=cur.index,
+                text=cur.text,
+                start=cur.start,
+                end=max(cur.start, new_start),
+            )
+    return updated
+
+
+def _fill_gaps(
+    cues: list[Cue],
+    *,
+    audio_duration: float | None = None,
+) -> list[Cue]:
+    """
+    Extend each cue end to the next cue start so the timeline is contiguous.
+
+    Starts are never moved. The last cue ends at ``audio_duration`` when that
+    value is known and greater than the cue start; otherwise its end is kept
+    (clamped to start if needed).
+    """
+    if not cues:
+        return cues
     updated: list[Cue] = []
+    last_i = len(cues) - 1
     for i, cue in enumerate(cues):
-        end = cue.end
-        if i + 1 < len(cues) and end > cues[i + 1].start:
+        if i < last_i:
             end = cues[i + 1].start
+        elif audio_duration is not None and audio_duration > cue.start:
+            end = audio_duration
+        else:
+            end = cue.end
         if end < cue.start:
             end = cue.start
         if end == cue.end:
@@ -211,13 +891,16 @@ def align_file(
     detect_language: bool = False,
     device: str = "auto",
     compute_type: str | None = None,
-    mode: str = "realign",
+    model_name: str = "small",
     margin: float = 0.5,
-    vad_method: str = "energy",
+    fill_gaps: bool = False,
     print_progress: bool = False,
 ) -> Path:
     """
     Align subtitle file timestamps to media using WhisperX forced alignment.
+
+    When ``fill_gaps`` is True, each cue end is extended to the next cue start
+    and the last cue ends at the media duration.
 
     Returns the output path written.
     """
@@ -231,11 +914,8 @@ def align_file(
     if language is None and not detect_language:
         raise ValueError("Provide --language or set detect_language=True")
 
-    is_plain_text = subtitle_path.suffix.lower() == ".txt"
-    if is_plain_text and mode == "refine":
-        raise ValueError("Plain text input has no timestamps; use realign mode instead of refine")
-    if is_plain_text:
-        mode = "realign"
+    subtitle_suffix = subtitle_path.suffix.lower()
+    use_transcription_windows = subtitle_suffix == ".txt"
 
     out_path = Path(output) if output else _default_output(subtitle_path)
     if out_path.suffix.lower() not in {".srt", ".lrc"}:
@@ -251,20 +931,6 @@ def align_file(
     if not cues:
         raise ValueError(f"No cues found in {subtitle_path}")
 
-    speech_spans = None
-    if mode == "realign":
-        speech_spans = detect_speech_spans(audio, method=vad_method)
-        if not speech_spans:
-            speech_spans = [(0.0, duration)] if duration > 0 else []
-
-    segments = assign_windows(
-        cues,
-        mode=mode,
-        margin=margin,
-        speech_spans=speech_spans,
-        audio_duration=duration,
-    )
-
     try:
         import whisperx
     except ImportError as exc:  # pragma: no cover - exercised when extra missing
@@ -274,10 +940,53 @@ def align_file(
         ) from exc
 
     lang = language or _detect_language(audio, resolved, ctype)
+
     align_model, metadata = whisperx.load_align_model(
         language_code=lang,
         device=resolved,
     )
+
+    if use_transcription_windows:
+        # Transcribe for rough windows, then word-align the ASR text so long
+        # multi-sentence segments are not evenly interpolated across pauses.
+        # Script text is still what we force-align onto the audio next.
+        speech_spans = detect_speech_spans(audio)
+        model = whisperx.load_model(model_name, resolved, compute_type=ctype, language=lang)
+        transcription = model.transcribe(audio, language=lang, batch_size=16)
+        asr_segments = transcription.get("segments") or []
+        if asr_segments:
+            asr_aligned = whisperx.align(
+                asr_segments,
+                align_model,
+                metadata,
+                audio,
+                resolved,
+                return_char_alignments=False,
+                print_progress=print_progress,
+            )
+            asr_segments = _segments_with_word_times(asr_segments, asr_aligned)
+        segments = build_script_align_segments(
+            cues,
+            asr_segments,
+            margin=margin,
+            audio_duration=duration,
+            speech_spans=speech_spans,
+        )
+    else:
+        segments = assign_windows(
+            cues,
+            mode="refine",
+            margin=margin,
+            audio_duration=duration,
+        )
+
+    search_segments = segments
+    groups: list[list[int]] | None = None
+    if use_transcription_windows:
+        # Short script lines get a wider align span by merging with neighbors;
+        # word remapping still assigns times back onto the original cues.
+        segments, groups = _merge_align_segments(cues, segments)
+
     result = whisperx.align(
         segments,
         align_model,
@@ -289,7 +998,17 @@ def align_file(
     )
     aligned = result.get("segments") or []
     word_segments = result.get("word_segments") or None
-    updated = _trim_overlaps(_apply_aligned_times(cues, aligned, word_segments=word_segments))
+    updated = _trim_overlaps(
+        _apply_aligned_times(
+            cues,
+            aligned,
+            word_segments=word_segments,
+            search_segments=search_segments,
+            groups=groups,
+        )
+    )
+    if fill_gaps:
+        updated = _fill_gaps(updated, audio_duration=duration)
     _write_cues(out_path, updated)
     return out_path
 

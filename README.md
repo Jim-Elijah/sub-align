@@ -1,4 +1,4 @@
-# Sub-align — align LRC/SRT subtitles to audio/video with WhisperX
+# Sub-align — align SRT/LRC/TXT subtitles to audio/video with WhisperX
 
 Force-align existing subtitle text to media so cues track speech even when
 the file has leading/trailing silence or local drift. Unlike tools that only
@@ -7,10 +7,11 @@ detected speech and then runs WhisperX phoneme alignment.
 
 ## Features
 
-- Formats: `.srt`, `.lrc`
-- Modes:
-  - `realign` (default): VAD speech spans + proportional cue windows, then WhisperX align
-  - `refine`: keep original timestamps, expand by a margin, then align
+- Formats: `.srt`, `.lrc`, `.txt`
+- Automatic strategy by input type:
+  - `.txt`: Whisper transcription for rough time windows, then WhisperX forced
+    align on the **original script lines** (not ASR wording)
+  - `.srt` / `.lrc`: keep original timestamps, expand by a margin, then align
 - Devices: `auto` / `cpu` / `cuda`
 - CLI and Python API
 - Packaged for PyPI (`sub-align`)
@@ -62,7 +63,8 @@ uv run ruff check src tests
 
 ```bash
 sub-align media.mp4 subs.srt --language zh -o out.srt
-sub-align audio.wav lyrics.lrc --language en --mode refine --margin 1.0
+sub-align audio.wav lyrics.lrc --language en --margin 1.0
+sub-align media.mkv script.txt --language en --model small
 sub-align media.mkv subs.srt --detect-language --device cuda
 ```
 
@@ -70,11 +72,11 @@ sub-align media.mkv subs.srt --detect-language --device cuda
 |------|---------|
 | `--language` | Alignment model language (`en`, `zh`, …) |
 | `--detect-language` | Use a tiny Whisper model when language is omitted |
-| `--mode` | `realign` or `refine` |
 | `--margin` | Search-window padding in seconds |
 | `--device` | `auto`, `cpu`, or `cuda` |
-| `--vad-method` | `energy` (default) or `silero` |
+| `--model` | Whisper model name or local path for `.txt` transcription windows (default: `small`) |
 | `--compute-type` | Override default (`float16` on CUDA, `int8` on CPU) |
+| `--fill-gaps` | Extend each cue end to the next cue start (last cue ends at audio duration) |
 
 ## Python API
 
@@ -87,16 +89,25 @@ align_file(
     output="a.aligned.srt",
     language="zh",
     device="auto",
-    mode="realign",
 )
 ```
+
+For `subtitle` input, strategy is chosen automatically:
+
+- `.txt` inputs are transcribed only to estimate search windows; forced alignment
+  uses each original script line as segment text
+- `.srt` and `.lrc` inputs reuse their existing timestamps as alignment windows
 
 ## How it differs from ffsubsync
 
 ffsubsync typically applies a global offset or linear stretch. With leading or
 trailing silence that can slide the whole subtitle track incorrectly.
-`sub-align` detects speech regions, assigns per-cue search windows, and runs
-WhisperX forced alignment so each line can move independently.
+`sub-align` chooses its alignment strategy from the subtitle format: plain-text
+`.txt` inputs are transcribed to estimate per-line search windows, then each
+original script line is force-aligned inside those windows; `.srt` and
+`.lrc` inputs reuse their existing timestamps as search windows. It then runs
+WhisperX forced alignment so each line can move independently instead of
+applying one global shift.
 
 **Limitation:** subtitle text must roughly match spoken content. Alignment does
 not correct wrong words.

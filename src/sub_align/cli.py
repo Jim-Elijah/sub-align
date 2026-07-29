@@ -11,7 +11,7 @@ from sub_align.align import align_file
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sub-align",
-        description="Align LRC/SRT subtitles to audio/video with WhisperX forced alignment.",
+        description="Align SRT/LRC/TXT subtitles to audio/video with WhisperX forced alignment.",
     )
     parser.add_argument("media", type=Path, help="Audio or video file")
     parser.add_argument("subtitle", type=Path, help="Subtitle file (.srt, .lrc, or .txt)")
@@ -44,22 +44,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="CTranslate2/Whisper compute type (default: float16 on CUDA, int8 on CPU)",
     )
     parser.add_argument(
-        "--mode",
-        default="realign",
-        choices=["realign", "refine"],
-        help="realign maps cues onto VAD speech; refine expands existing timestamps",
-    )
-    parser.add_argument(
         "--margin",
         type=float,
         default=0.5,
         help="Seconds of padding around each search window (default: 0.5)",
     )
     parser.add_argument(
-        "--vad-method",
-        default="energy",
-        choices=["energy", "silero"],
-        help="Speech detection method for realign mode (default: energy)",
+        "--model",
+        default="small",
+        help="Whisper model name or local path for .txt window transcription (default: small)",
+    )
+    parser.add_argument(
+        "--fill-gaps",
+        action="store_true",
+        help="Extend each cue end to the next cue start (last cue ends at audio duration)",
     )
     parser.add_argument(
         "--print-progress",
@@ -82,9 +80,9 @@ def main(argv: list[str] | None = None) -> int:
             detect_language=args.detect_language,
             device=args.device,
             compute_type=args.compute_type,
-            mode=args.mode,
+            model_name=args.model,
             margin=args.margin,
-            vad_method=args.vad_method,
+            fill_gaps=args.fill_gaps,
             print_progress=args.print_progress,
         )
     except Exception as exc:  # noqa: BLE001 - CLI boundary

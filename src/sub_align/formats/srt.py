@@ -6,9 +6,7 @@ from pathlib import Path
 from sub_align.models import Cue
 
 # Wide-in: H:M:S with 1–2 digit fields; frac 1–6 digits; `,` or `.`
-_TIME_RE = re.compile(
-    r"(?P<h>\d{1,2}):(?P<m>\d{1,2}):(?P<s>\d{1,2})(?:[,.](?P<frac>\d{1,6}))?"
-)
+_TIME_RE = re.compile(r"(?P<h>\d{1,2}):(?P<m>\d{1,2}):(?P<s>\d{1,2})(?:[,.](?P<frac>\d{1,6}))?")
 _ARROW_RE = re.compile(r"\s*-->\s*")
 
 

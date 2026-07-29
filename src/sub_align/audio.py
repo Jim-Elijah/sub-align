@@ -13,8 +13,7 @@ def load_audio(path: str | Path) -> np.ndarray:
         import whisperx
     except ImportError as exc:  # pragma: no cover
         raise ImportError(
-            "whisperx is required to load media. Install with: "
-            "pip install 'sub-align[align]'"
+            "whisperx is required to load media. Install with: pip install 'sub-align[align]'"
         ) from exc
 
     return whisperx.load_audio(str(path))

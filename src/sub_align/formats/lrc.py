@@ -6,9 +6,7 @@ from pathlib import Path
 from sub_align.models import Cue
 
 # Wide-in: minutes 1–3 digits, seconds 1–2, frac 1–6 digits, `.` or `,`
-_TAG_RE = re.compile(
-    r"\[(?P<m>\d{1,3}):(?P<s>\d{1,2})(?:[.,](?P<frac>\d{1,6}))?\]\s*(?P<text>.*)"
-)
+_TAG_RE = re.compile(r"\[(?P<m>\d{1,3}):(?P<s>\d{1,2})(?:[.,](?P<frac>\d{1,6}))?\]\s*(?P<text>.*)")
 _DEFAULT_DURATION = 3.0
 
 

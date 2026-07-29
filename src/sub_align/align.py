@@ -151,9 +151,7 @@ def _apply_one_to_one(cues: list[Cue], aligned_segments: list[dict]) -> list[Cue
         end = float(segment.get("end", cues[i].end))
         if end < start:
             end = start
-        updated.append(
-            Cue(index=cues[i].index, text=cues[i].text, start=start, end=end)
-        )
+        updated.append(Cue(index=cues[i].index, text=cues[i].text, start=start, end=end))
     for cue in cues[count:]:
         updated.append(cue)
     return updated
@@ -284,9 +282,7 @@ def align_file(
     )
     aligned = result.get("segments") or []
     word_segments = result.get("word_segments") or None
-    updated = _trim_overlaps(
-        _apply_aligned_times(cues, aligned, word_segments=word_segments)
-    )
+    updated = _trim_overlaps(_apply_aligned_times(cues, aligned, word_segments=word_segments))
     _write_cues(out_path, updated)
     return out_path
 

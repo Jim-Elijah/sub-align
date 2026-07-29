@@ -24,8 +24,11 @@ jobs:
         # Unit tests mock WhisperX; skip the heavy align extra in CI.
         run: uv sync --group dev
 
-      - name: Ruff
+      - name: Ruff check
         run: uv run ruff check src tests
+
+      - name: Ruff format
+        run: uv run ruff format --check src tests
 
       - name: Pytest
         run: uv run pytest -q

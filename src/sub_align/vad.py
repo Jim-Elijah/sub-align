@@ -100,9 +100,7 @@ def silero_speech_spans(
             sampling_rate=sample_rate,
             threshold=threshold,
         )
-        spans = [
-            (item["start"] / sample_rate, item["end"] / sample_rate) for item in timestamps
-        ]
+        spans = [(item["start"] / sample_rate, item["end"] / sample_rate) for item in timestamps]
         return _merge_spans(spans)
     except Exception:
         return energy_speech_spans(audio, sample_rate=sample_rate)

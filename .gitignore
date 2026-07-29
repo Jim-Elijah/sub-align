@@ -1,0 +1,28 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+*.so
+
+# Virtual environments
+.venv
+venv/
+
+# Tooling / OS
+.coverage
+htmlcov/
+.DS_Store
+*.log
+
+# Models / local media
+*.wav
+*.mp3
+*.mp4
+*.mkv
+!tests/fixtures/**

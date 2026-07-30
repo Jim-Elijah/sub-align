@@ -73,6 +73,7 @@ World
             language="en",
             device="cpu",
             margin=0.1,
+            auto_offset=False,
         )
 
     assert result == out
@@ -758,8 +759,279 @@ World
             device="cpu",
             margin=0.1,
             fill_gaps=True,
+            auto_offset=False,
         )
 
     cues = srt.load(out)
     assert abs(cues[0].end - 1.5) < 1e-6
     assert abs(cues[1].end - 3.0) < 1e-6
+
+
+def test_align_file_trim_start_shifts_output_times(tmp_path: Path):
+    media = tmp_path / "a.wav"
+    media.write_bytes(b"RIFF")
+    subtitle = tmp_path / "a.txt"
+    subtitle.write_text("Hello\nWorld\n", encoding="utf-8")
+    out = tmp_path / "out.srt"
+
+    # 10s media; intro occupies first 2s (trimmed away).
+    fake_audio = np.zeros(16_000 * 10, dtype=np.float32)
+    fake_wx = MagicMock()
+    fake_wx.load_align_model.return_value = (MagicMock(), {"language": "en"})
+    # Times returned by WhisperX are relative to the trimmed audio.
+    fake_wx.align.return_value = {
+        "segments": [
+            {"text": "Hello", "start": 0.5, "end": 1.0},
+            {"text": "World", "start": 1.2, "end": 1.8},
+        ],
+        "word_segments": [
+            {"word": "Hello", "start": 0.5, "end": 1.0},
+            {"word": "World", "start": 1.2, "end": 1.8},
+        ],
+    }
+    fake_model = MagicMock()
+    fake_model.transcribe.return_value = {
+        "segments": [
+            {"text": "Hello", "start": 0.5, "end": 1.0},
+            {"text": "World", "start": 1.2, "end": 1.8},
+        ]
+    }
+    fake_wx.load_model.return_value = fake_model
+
+    with (
+        patch.dict(sys.modules, {"whisperx": fake_wx}),
+        patch("sub_align.align.load_audio", return_value=fake_audio),
+        patch(
+            "sub_align.align.detect_speech_spans",
+            return_value=[(0.0, 8.0)],
+        ),
+    ):
+        from sub_align.align import align_file
+
+        align_file(
+            media=media,
+            subtitle=subtitle,
+            output=out,
+            language="en",
+            device="cpu",
+            margin=0.0,
+            trim_start=2.0,
+            trim_end=0.0,
+        )
+
+    # Align must see 8s of audio (10 - 2).
+    aligned_audio = fake_wx.align.call_args.args[3]
+    assert abs(len(aligned_audio) / 16_000 - 8.0) < 1e-6
+
+    cues = srt.load(out)
+    assert abs(cues[0].start - 2.5) < 1e-6
+    assert abs(cues[0].end - 3.0) < 1e-6
+    assert abs(cues[1].start - 3.2) < 1e-6
+    assert abs(cues[1].end - 3.8) < 1e-6
+
+
+def test_estimate_global_offset_median_shift():
+    from sub_align.align import estimate_global_offset
+    from sub_align.models import Cue
+
+    cues = [
+        Cue(1, "Hello there friend", 0.0, 1.0),
+        Cue(2, "How are you today", 1.0, 2.0),
+        Cue(3, "I am doing fine", 2.0, 3.0),
+        Cue(4, "Thanks for asking me", 3.0, 4.0),
+    ]
+    # ASR is consistently ~10s later than cue times.
+    asr = [
+        {"text": "Hello there friend", "start": 10.0, "end": 11.0},
+        {"text": "How are you today", "start": 11.0, "end": 12.0},
+        {"text": "I am doing fine", "start": 12.0, "end": 13.0},
+        {"text": "Thanks for asking me", "start": 13.0, "end": 14.0},
+    ]
+    assert abs(estimate_global_offset(cues, asr) - 10.0) < 0.5
+
+
+def test_estimate_global_offset_ignores_small_drift():
+    from sub_align.align import estimate_global_offset
+    from sub_align.models import Cue
+
+    cues = [
+        Cue(1, "Hello there friend", 0.0, 1.0),
+        Cue(2, "How are you today", 1.0, 2.0),
+        Cue(3, "I am doing fine", 2.0, 3.0),
+    ]
+    asr = [
+        {"text": "Hello there friend", "start": 0.1, "end": 1.1},
+        {"text": "How are you today", "start": 1.1, "end": 2.1},
+        {"text": "I am doing fine", "start": 2.1, "end": 3.1},
+    ]
+    assert estimate_global_offset(cues, asr) == 0.0
+
+
+def test_estimate_global_offset_needs_min_matches():
+    from sub_align.align import estimate_global_offset
+    from sub_align.models import Cue
+
+    cues = [
+        Cue(1, "Hello there", 0.0, 1.0),
+        Cue(2, "How are you", 1.0, 2.0),
+    ]
+    asr = [
+        {"text": "Hello there", "start": 5.0, "end": 6.0},
+        {"text": "How are you", "start": 6.0, "end": 7.0},
+    ]
+    assert estimate_global_offset(cues, asr) == 0.0
+
+
+def test_align_file_manual_offset(tmp_path: Path):
+    media = tmp_path / "a.wav"
+    media.write_bytes(b"RIFF")
+    subtitle = tmp_path / "a.srt"
+    srt.dump(
+        subtitle,
+        srt.loads(
+            """1
+00:00:00,000 --> 00:00:01,000
+Hello
+
+2
+00:00:01,000 --> 00:00:02,000
+World
+"""
+        ),
+    )
+    out = tmp_path / "out.srt"
+
+    fake_audio = np.zeros(16_000 * 5, dtype=np.float32)
+    fake_wx = MagicMock()
+    fake_wx.load_align_model.return_value = (MagicMock(), {"language": "en"})
+    fake_wx.align.return_value = {
+        "segments": [
+            {"text": "Hello", "start": 2.0, "end": 2.4},
+            {"text": "World", "start": 2.5, "end": 2.9},
+        ]
+    }
+
+    with (
+        patch.dict(sys.modules, {"whisperx": fake_wx}),
+        patch("sub_align.align.load_audio", return_value=fake_audio),
+    ):
+        from sub_align.align import align_file
+
+        align_file(
+            media=media,
+            subtitle=subtitle,
+            output=out,
+            language="en",
+            device="cpu",
+            margin=0.1,
+            offset=2.0,
+            auto_offset=True,
+        )
+
+    # Manual offset must skip transcription.
+    fake_wx.load_model.assert_not_called()
+    # Refine windows should be around the shifted cues (~2s / ~3s).
+    segments = fake_wx.align.call_args.args[0]
+    assert segments[0]["start"] == pytest.approx(1.9, abs=1e-6)
+    assert segments[1]["start"] == pytest.approx(2.9, abs=1e-6)
+
+    cues = srt.load(out)
+    assert abs(cues[0].start - 2.0) < 1e-6
+    assert abs(cues[1].end - 2.9) < 1e-6
+
+
+def test_align_file_auto_offset(tmp_path: Path):
+    media = tmp_path / "a.wav"
+    media.write_bytes(b"RIFF")
+    subtitle = tmp_path / "a.srt"
+    # Cues are 10s early relative to speech in the media.
+    srt.dump(
+        subtitle,
+        srt.loads(
+            """1
+00:00:00,000 --> 00:00:01,000
+Hello there friend
+
+2
+00:00:01,000 --> 00:00:02,000
+How are you today
+
+3
+00:00:02,000 --> 00:00:03,000
+I am doing fine
+
+4
+00:00:03,000 --> 00:00:04,000
+Thanks for asking me
+"""
+        ),
+    )
+    out = tmp_path / "out.srt"
+
+    fake_audio = np.zeros(16_000 * 20, dtype=np.float32)
+    fake_wx = MagicMock()
+    fake_wx.load_align_model.return_value = (MagicMock(), {"language": "en"})
+    fake_wx.align.return_value = {
+        "segments": [
+            {"text": "Hello there friend", "start": 10.0, "end": 10.8},
+            {"text": "How are you today", "start": 11.0, "end": 11.8},
+            {"text": "I am doing fine", "start": 12.0, "end": 12.8},
+            {"text": "Thanks for asking me", "start": 13.0, "end": 13.8},
+        ]
+    }
+    fake_model = MagicMock()
+    fake_model.transcribe.return_value = {
+        "segments": [
+            {"text": "Hello there friend", "start": 10.0, "end": 11.0},
+            {"text": "How are you today", "start": 11.0, "end": 12.0},
+            {"text": "I am doing fine", "start": 12.0, "end": 13.0},
+            {"text": "Thanks for asking me", "start": 13.0, "end": 14.0},
+        ]
+    }
+    fake_wx.load_model.return_value = fake_model
+
+    with (
+        patch.dict(sys.modules, {"whisperx": fake_wx}),
+        patch("sub_align.align.load_audio", return_value=fake_audio),
+    ):
+        from sub_align.align import align_file
+
+        align_file(
+            media=media,
+            subtitle=subtitle,
+            output=out,
+            language="en",
+            device="cpu",
+            margin=0.1,
+        )
+
+    fake_wx.load_model.assert_called_once()
+    segments = fake_wx.align.call_args.args[0]
+    # After ~+10s auto offset, refine windows sit near the ASR times.
+    assert segments[0]["start"] == pytest.approx(9.9, abs=0.6)
+    cues = srt.load(out)
+    assert abs(cues[0].start - 10.0) < 1e-6
+
+
+def test_align_file_trim_rejects_over_trim(tmp_path: Path):
+    from sub_align.align import align_file
+
+    media = tmp_path / "a.wav"
+    media.write_bytes(b"RIFF")
+    subtitle = tmp_path / "a.txt"
+    subtitle.write_text("Hi\n", encoding="utf-8")
+    fake_audio = np.zeros(16_000 * 2, dtype=np.float32)
+
+    with (
+        patch.dict(sys.modules, {"whisperx": MagicMock()}),
+        patch("sub_align.align.load_audio", return_value=fake_audio),
+        pytest.raises(ValueError, match="less than audio duration"),
+    ):
+        align_file(
+            media=media,
+            subtitle=subtitle,
+            language="en",
+            device="cpu",
+            trim_start=1.5,
+            trim_end=1.0,
+        )

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import re
+import sys
 from difflib import SequenceMatcher
 from pathlib import Path
+from statistics import median
 
-from sub_align.audio import audio_duration, load_audio
+from sub_align.audio import audio_duration, load_audio, trim_audio
 from sub_align.device import default_compute_type, resolve_device
 from sub_align.formats import lrc, srt, txt
 from sub_align.models import Cue
@@ -29,6 +31,9 @@ _GAP_EDGE_GUARD = 0.5
 _SHORT_CUE_TOKENS = 3
 # Aligned cue shorter than this is treated as failed and repaired from windows.
 _MIN_ALIGNED_DURATION = 0.05
+# Global offset for .srt/.lrc: need enough ASR↔cue matches; ignore tiny drift.
+_MIN_OFFSET_MATCHES = 3
+_MIN_ABS_OFFSET = 0.25
 
 
 def _read_cues(
@@ -882,6 +887,50 @@ def _fill_gaps(
     return updated
 
 
+def _shift_cues(cues: list[Cue], offset: float) -> list[Cue]:
+    if offset == 0:
+        return cues
+    return [
+        Cue(
+            index=cue.index,
+            text=cue.text,
+            start=cue.start + offset,
+            end=cue.end + offset,
+        )
+        for cue in cues
+    ]
+
+
+def estimate_global_offset(
+    cues: list[Cue],
+    asr_segments: list[dict],
+    *,
+    min_matches: int = _MIN_OFFSET_MATCHES,
+    ignore_below: float = _MIN_ABS_OFFSET,
+) -> float:
+    """
+    Estimate a constant timeline shift so cue times land near ASR speech.
+
+    Matches cue text to ASR via the same token aligner used for .txt windows,
+    then returns the median of (asr_start - cue.start). Returns 0 when too few
+    cues match or the median drift is below ``ignore_below``.
+    """
+    if not cues or not asr_segments:
+        return 0.0
+    windows = _assign_windows_from_asr(cues, _timed_asr_tokens(asr_segments))
+    deltas: list[float] = []
+    for cue, (start, _) in zip(cues, windows, strict=True):
+        if start is None:
+            continue
+        deltas.append(float(start) - cue.start)
+    if len(deltas) < min_matches:
+        return 0.0
+    offset = float(median(deltas))
+    if abs(offset) < ignore_below:
+        return 0.0
+    return offset
+
+
 def align_file(
     media: str | Path,
     subtitle: str | Path,
@@ -894,13 +943,26 @@ def align_file(
     model_name: str = "small",
     margin: float = 0.5,
     fill_gaps: bool = False,
+    trim_start: float = 0.0,
+    trim_end: float = 0.0,
+    offset: float | None = None,
+    auto_offset: bool = True,
     print_progress: bool = False,
 ) -> Path:
     """
     Align subtitle file timestamps to media using WhisperX forced alignment.
 
     When ``fill_gaps`` is True, each cue end is extended to the next cue start
-    and the last cue ends at the media duration.
+    and the last cue ends at the kept media region (after trim).
+
+    ``trim_start`` / ``trim_end`` drop leading/trailing seconds before alignment
+    (e.g. podcast intros not present in the script). Output times are remapped
+    onto the original media timeline.
+
+    For ``.srt`` / ``.lrc``, a constant timeline shift is applied before refine:
+    use ``offset`` to set it manually, or leave ``auto_offset=True`` (default)
+    to estimate it from a short Whisper transcription. ``.txt`` inputs ignore
+    these options (windows come from transcription already).
 
     Returns the output path written.
     """
@@ -924,12 +986,27 @@ def align_file(
     resolved = resolve_device(device)
     ctype = default_compute_type(resolved, compute_type)
 
-    audio = load_audio(media_path)
+    full_audio = load_audio(media_path)
+    full_duration = audio_duration(full_audio)
+    audio = trim_audio(full_audio, trim_start=trim_start, trim_end=trim_end)
     duration = audio_duration(audio)
+    # Cue times for .srt/.lrc are on the original timeline; shift into the
+    # trimmed coordinate system used by WhisperX on ``audio``.
+    cue_time_offset = trim_start
 
-    cues = _read_cues(subtitle_path, audio_duration=duration)
+    cues = _read_cues(subtitle_path, audio_duration=full_duration)
     if not cues:
         raise ValueError(f"No cues found in {subtitle_path}")
+    if cue_time_offset:
+        cues = [
+            Cue(
+                index=cue.index,
+                text=cue.text,
+                start=max(0.0, cue.start - cue_time_offset),
+                end=max(0.0, cue.end - cue_time_offset),
+            )
+            for cue in cues
+        ]
 
     try:
         import whisperx
@@ -973,6 +1050,24 @@ def align_file(
             speech_spans=speech_spans,
         )
     else:
+        # Constant shift first (manual or ASR-estimated), then refine locally.
+        applied_offset = 0.0
+        offset_source = "none"
+        if offset is not None:
+            applied_offset = float(offset)
+            offset_source = "manual"
+        elif auto_offset:
+            model = whisperx.load_model(model_name, resolved, compute_type=ctype, language=lang)
+            transcription = model.transcribe(audio, language=lang, batch_size=16)
+            asr_segments = transcription.get("segments") or []
+            applied_offset = estimate_global_offset(cues, asr_segments)
+            offset_source = "auto"
+        if applied_offset:
+            cues = _shift_cues(cues, applied_offset)
+            print(
+                f"sub-align: applied global offset {applied_offset:+.3f}s ({offset_source})",
+                file=sys.stderr,
+            )
         segments = assign_windows(
             cues,
             mode="refine",
@@ -1009,6 +1104,7 @@ def align_file(
     )
     if fill_gaps:
         updated = _fill_gaps(updated, audio_duration=duration)
+    updated = _shift_cues(updated, cue_time_offset)
     _write_cues(out_path, updated)
     return out_path
 

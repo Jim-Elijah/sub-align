@@ -52,12 +52,41 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model",
         default="small",
-        help="Whisper model name or local path for .txt window transcription (default: small)",
+        help=(
+            "Whisper model name or local path for .txt windows and .srt/.lrc "
+            "auto-offset (default: small)"
+        ),
     )
     parser.add_argument(
         "--fill-gaps",
         action="store_true",
         help="Extend each cue end to the next cue start (last cue ends at audio duration)",
+    )
+    parser.add_argument(
+        "--trim-start",
+        type=float,
+        default=0.0,
+        help="Seconds to drop from the start of the media before alignment (default: 0)",
+    )
+    parser.add_argument(
+        "--trim-end",
+        type=float,
+        default=0.0,
+        help="Seconds to drop from the end of the media before alignment (default: 0)",
+    )
+    parser.add_argument(
+        "--offset",
+        type=float,
+        default=None,
+        help=(
+            "Constant seconds to shift .srt/.lrc cues before refine "
+            "(skips auto-offset; ignored for .txt)"
+        ),
+    )
+    parser.add_argument(
+        "--no-auto-offset",
+        action="store_true",
+        help="Disable automatic global offset estimation for .srt/.lrc",
     )
     parser.add_argument(
         "--print-progress",
@@ -83,6 +112,10 @@ def main(argv: list[str] | None = None) -> int:
             model_name=args.model,
             margin=args.margin,
             fill_gaps=args.fill_gaps,
+            trim_start=args.trim_start,
+            trim_end=args.trim_end,
+            offset=args.offset,
+            auto_offset=not args.no_auto_offset,
             print_progress=args.print_progress,
         )
     except Exception as exc:  # noqa: BLE001 - CLI boundary

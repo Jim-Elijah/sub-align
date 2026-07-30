@@ -34,6 +34,13 @@ _MIN_ALIGNED_DURATION = 0.05
 # Global offset for .srt/.lrc: need enough ASR↔cue matches; ignore tiny drift.
 _MIN_OFFSET_MATCHES = 3
 _MIN_ABS_OFFSET = 0.25
+# Suggested limits when callers opt into length/duration splitting (CLI/API).
+_TRANSCRIPT_MAX_WORDS = 12
+_TRANSCRIPT_MAX_CHARS = 42
+_TRANSCRIPT_MAX_DURATION = 8.0
+_EN_STRONG_BREAKS = ".?!;"
+_GENERIC_STRONG_BREAKS = "。？！；"
+_SECONDARY_BREAKS = ",:，：、"
 
 
 def _read_cues(
@@ -60,6 +67,207 @@ def _write_cues(path: Path, cues: list[Cue]) -> None:
         lrc.dump(path, cues)
         return
     raise ValueError(f"Unsupported subtitle format: {suffix}")
+
+
+def _cues_from_transcription(segments: list[dict]) -> list[Cue]:
+    cues: list[Cue] = []
+    for idx, segment in enumerate(segments, start=1):
+        start_raw = segment.get("start")
+        end_raw = segment.get("end")
+        if start_raw is None or end_raw is None:
+            continue
+        start = float(start_raw)
+        end = float(end_raw)
+        if end < start:
+            end = start
+        text = str(segment.get("text") or "").strip()
+        if not text:
+            continue
+        cues.append(Cue(index=idx, text=text, start=start, end=end))
+    return cues
+
+
+def _split_sentence_like_units(text: str, language: str | None) -> list[str]:
+    """Split text by strong punctuation first (English + generic fallback)."""
+    cleaned = " ".join(text.strip().split())
+    if not cleaned:
+        return []
+    strong = _EN_STRONG_BREAKS + _GENERIC_STRONG_BREAKS
+    if language and language.lower().startswith("en"):
+        strong = _EN_STRONG_BREAKS + _GENERIC_STRONG_BREAKS
+    pattern = rf"(?<=[{re.escape(strong)}])\s+"
+    parts = [part.strip() for part in re.split(pattern, cleaned) if part.strip()]
+    return parts or [cleaned]
+
+
+def _split_by_length(
+    text: str,
+    *,
+    max_words: int | None = None,
+    max_chars: int | None = None,
+) -> list[str]:
+    """Length fallback split: prefer boundaries on light punctuation."""
+    cleaned = text.strip()
+    if not cleaned:
+        return []
+    if max_words is None and max_chars is None:
+        return [cleaned]
+    words = cleaned.split()
+    if not words:
+        return []
+    chunks: list[str] = []
+    buf: list[str] = []
+    for word in words:
+        candidate = " ".join(buf + [word])
+        overflow = (max_words is not None and len(buf) >= max_words) or (
+            max_chars is not None and len(candidate) > max_chars
+        )
+        if overflow and buf:
+            # Try to cut after the last weak punctuation inside the buffer.
+            cut_at = -1
+            for i in range(len(buf) - 1, -1, -1):
+                if buf[i].rstrip().endswith(tuple(_SECONDARY_BREAKS)):
+                    cut_at = i
+                    break
+            if cut_at >= 0:
+                chunks.append(" ".join(buf[: cut_at + 1]))
+                buf = buf[cut_at + 1 :]
+            else:
+                chunks.append(" ".join(buf))
+                buf = []
+        buf.append(word)
+    if buf:
+        chunks.append(" ".join(buf))
+    return [chunk for chunk in chunks if chunk]
+
+
+def _chunk_timings(
+    chunks: list[str],
+    *,
+    start: float,
+    end: float,
+    words: list | None,
+) -> list[tuple[float, float]]:
+    """
+    Assign start/end to each text chunk.
+
+    Prefer consuming word-level timestamps in order; fall back to proportional
+    word-count shares across the parent segment span.
+    """
+    if not chunks:
+        return []
+    stream = _word_time_stream(words) if words else []
+    usable = [(tok, t0, t1) for tok, t0, t1 in stream if t0 is not None and t1 is not None]
+    if usable:
+        times: list[tuple[float, float]] = []
+        cursor = 0
+        for i, chunk in enumerate(chunks):
+            n = max(len(_alnum_tokens(chunk)), 1)
+            if cursor >= len(usable):
+                t = times[-1][1] if times else end
+                times.append((t, t if i < len(chunks) - 1 else end))
+                continue
+            take = min(n, len(usable) - cursor)
+            if i == len(chunks) - 1:
+                take = len(usable) - cursor
+            piece = usable[cursor : cursor + take]
+            cursor += take
+            t0 = max(start, min(float(piece[0][1]), end))
+            t1 = max(t0, min(float(piece[-1][2]), end))
+            if times and t0 < times[-1][1]:
+                t0 = times[-1][1]
+            if t1 < t0:
+                t1 = t0
+            times.append((t0, t1))
+        return times
+
+    weights = [max(len(_alnum_tokens(chunk)), 1) for chunk in chunks]
+    total_weight = float(sum(weights))
+    cursor = start
+    span = end - start
+    times = []
+    for i, weight in enumerate(weights):
+        share = span * (weight / total_weight) if total_weight > 0 else 0.0
+        chunk_start = cursor
+        chunk_end = cursor + share if i < len(chunks) - 1 else end
+        cursor = chunk_end
+        if chunk_end < chunk_start:
+            chunk_end = chunk_start
+        times.append((chunk_start, chunk_end))
+    return times
+
+
+def _split_transcription_segments(
+    segments: list[dict],
+    *,
+    language: str | None,
+    max_words: int | None = None,
+    max_chars: int | None = None,
+    max_duration: float | None = None,
+) -> list[dict]:
+    """
+    Split ASR segments on sentence boundaries for practice-friendly cues.
+
+    Default strategy is punctuation-first (strong breaks only). Optional
+    ``max_words`` / ``max_chars`` / ``max_duration`` enable length or duration
+    fallbacks for display-oriented subtitle lines.
+
+    Short fragments stay as their own cues (no merge) so dialogue turns are
+    not glued onto the previous speaker. Timings prefer per-word timestamps
+    when present.
+    """
+    split_segments: list[dict] = []
+    for segment in segments:
+        start_raw = segment.get("start")
+        end_raw = segment.get("end")
+        if start_raw is None or end_raw is None:
+            continue
+        start = float(start_raw)
+        end = float(end_raw)
+        if end < start:
+            end = start
+        text = str(segment.get("text") or "").strip()
+        if not text:
+            continue
+
+        units = _split_sentence_like_units(text, language)
+        chunks: list[str] = []
+        length_limits = max_words is not None or max_chars is not None
+        for unit in units:
+            if length_limits:
+                chunks.extend(_split_by_length(unit, max_words=max_words, max_chars=max_chars))
+            else:
+                chunks.append(unit)
+        chunks = [c for c in chunks if c]
+        if not chunks:
+            chunks = [text]
+
+        # Optional duration guard: further split a single long span by word count.
+        total_span = max(0.0, end - start)
+        if (
+            max_duration is not None
+            and max_duration > 0
+            and total_span > max_duration
+            and len(chunks) == 1
+        ):
+            words = chunks[0].split()
+            if words:
+                est_parts = max(2, int(round(total_span / max_duration)))
+                size = max(1, len(words) // est_parts)
+                expanded: list[str] = []
+                for i in range(0, len(words), size):
+                    expanded.append(" ".join(words[i : i + size]))
+                chunks = expanded or chunks
+
+        word_list = segment.get("words")
+        words = word_list if isinstance(word_list, list) else None
+        for chunk, (chunk_start, chunk_end) in zip(
+            chunks,
+            _chunk_timings(chunks, start=start, end=end, words=words),
+            strict=True,
+        ):
+            split_segments.append({"text": chunk, "start": chunk_start, "end": chunk_end})
+    return split_segments
 
 
 def _detect_language(audio, device: str, compute_type: str) -> str:
@@ -933,7 +1141,7 @@ def estimate_global_offset(
 
 def align_file(
     media: str | Path,
-    subtitle: str | Path,
+    subtitle: str | Path | None = None,
     output: str | Path | None = None,
     *,
     language: str | None = None,
@@ -948,9 +1156,12 @@ def align_file(
     offset: float | None = None,
     auto_offset: bool = True,
     print_progress: bool = False,
+    max_words: int | None = None,
+    max_chars: int | None = None,
+    max_duration: float | None = None,
 ) -> Path:
     """
-    Align subtitle file timestamps to media using WhisperX forced alignment.
+    Align subtitle timestamps to media, or transcribe media when no subtitle is given.
 
     When ``fill_gaps`` is True, each cue end is extended to the next cue start
     and the last cue ends at the kept media region (after trim).
@@ -959,27 +1170,33 @@ def align_file(
     (e.g. podcast intros not present in the script). Output times are remapped
     onto the original media timeline.
 
-    For ``.srt`` / ``.lrc``, a constant timeline shift is applied before refine:
-    use ``offset`` to set it manually, or leave ``auto_offset=True`` (default)
-    to estimate it from a short Whisper transcription. ``.txt`` inputs ignore
-    these options (windows come from transcription already).
+    When ``subtitle`` is omitted, this runs WhisperX transcription and writes
+    timed subtitles directly. Audio-only cues default to strong-punctuation
+    sentence splits; pass ``max_words`` / ``max_chars`` / ``max_duration`` to
+    also cap line length or duration (display-oriented subtitles).
+
+    For subtitle inputs, ``.srt`` / ``.lrc`` apply a constant timeline shift
+    before refine: use ``offset`` to set it manually, or leave
+    ``auto_offset=True`` (default) to estimate from a short Whisper
+    transcription. ``.txt`` inputs ignore these options (windows come from
+    transcription already).
 
     Returns the output path written.
     """
     media_path = Path(media)
-    subtitle_path = Path(subtitle)
+    subtitle_path = Path(subtitle) if subtitle is not None else None
     if not media_path.is_file():
         raise FileNotFoundError(f"Media not found: {media_path}")
-    if not subtitle_path.is_file():
+    if subtitle_path is not None and not subtitle_path.is_file():
         raise FileNotFoundError(f"Subtitle not found: {subtitle_path}")
 
     if language is None and not detect_language:
         raise ValueError("Provide --language or set detect_language=True")
 
-    subtitle_suffix = subtitle_path.suffix.lower()
+    subtitle_suffix = subtitle_path.suffix.lower() if subtitle_path is not None else ""
     use_transcription_windows = subtitle_suffix == ".txt"
 
-    out_path = Path(output) if output else _default_output(subtitle_path)
+    out_path = Path(output) if output else _default_output(media_path, subtitle_path)
     if out_path.suffix.lower() not in {".srt", ".lrc"}:
         out_path = out_path.with_suffix(".srt")
 
@@ -990,10 +1207,57 @@ def align_file(
     full_duration = audio_duration(full_audio)
     audio = trim_audio(full_audio, trim_start=trim_start, trim_end=trim_end)
     duration = audio_duration(audio)
-    # Cue times for .srt/.lrc are on the original timeline; shift into the
-    # trimmed coordinate system used by WhisperX on ``audio``.
     cue_time_offset = trim_start
 
+    try:
+        import whisperx
+    except ImportError as exc:  # pragma: no cover - exercised when extra missing
+        raise ImportError(
+            "whisperx is required for alignment. Install with: "
+            "pip install 'sub-align[align]' (or [cpu]/[gpu])"
+        ) from exc
+
+    lang = language or _detect_language(audio, resolved, ctype)
+
+    if subtitle_path is None:
+        model = whisperx.load_model(model_name, resolved, compute_type=ctype, language=lang)
+        transcription = model.transcribe(audio, language=lang, batch_size=16)
+        asr_segments = transcription.get("segments") or []
+        # Word-align ASR so split cues use real word boundaries instead of
+        # proportional timing within each Whisper segment.
+        if asr_segments:
+            align_model, metadata = whisperx.load_align_model(
+                language_code=lang,
+                device=resolved,
+            )
+            asr_aligned = whisperx.align(
+                asr_segments,
+                align_model,
+                metadata,
+                audio,
+                resolved,
+                return_char_alignments=False,
+                print_progress=print_progress,
+            )
+            asr_segments = _segments_with_word_times(asr_segments, asr_aligned)
+        split_segments = _split_transcription_segments(
+            asr_segments,
+            language=lang,
+            max_words=max_words,
+            max_chars=max_chars,
+            max_duration=max_duration,
+        )
+        updated = _cues_from_transcription(split_segments)
+        if not updated:
+            raise ValueError("No timed transcription segments found in media")
+        if fill_gaps:
+            updated = _fill_gaps(updated, audio_duration=duration)
+        updated = _shift_cues(updated, cue_time_offset)
+        _write_cues(out_path, updated)
+        return out_path
+
+    # Cue times for .srt/.lrc are on the original timeline; shift into the
+    # trimmed coordinate system used by WhisperX on ``audio``.
     cues = _read_cues(subtitle_path, audio_duration=full_duration)
     if not cues:
         raise ValueError(f"No cues found in {subtitle_path}")
@@ -1007,16 +1271,6 @@ def align_file(
             )
             for cue in cues
         ]
-
-    try:
-        import whisperx
-    except ImportError as exc:  # pragma: no cover - exercised when extra missing
-        raise ImportError(
-            "whisperx is required for alignment. Install with: "
-            "pip install 'sub-align[align]' (or [cpu]/[gpu])"
-        ) from exc
-
-    lang = language or _detect_language(audio, resolved, ctype)
 
     align_model, metadata = whisperx.load_align_model(
         language_code=lang,
@@ -1109,5 +1363,7 @@ def align_file(
     return out_path
 
 
-def _default_output(subtitle_path: Path) -> Path:
+def _default_output(media_path: Path, subtitle_path: Path | None) -> Path:
+    if subtitle_path is None:
+        return media_path.with_name(f"{media_path.stem}.asr.srt")
     return subtitle_path.with_name(f"{subtitle_path.stem}.aligned{subtitle_path.suffix}")

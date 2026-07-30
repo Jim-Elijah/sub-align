@@ -84,6 +84,9 @@ sub-align media.mkv subs.srt --detect-language --device cuda
 | `--trim-end` | Seconds to drop from media end before alignment (e.g. outro) |
 | `--offset` | Constant seconds to shift `.srt`/`.lrc` cues before refine (skips auto-offset) |
 | `--no-auto-offset` | Disable automatic global offset estimation for `.srt`/`.lrc` |
+| `--max-words` | Audio-only: max words per cue after punctuation split (omit = full sentences) |
+| `--max-chars` | Audio-only: max characters per cue after punctuation split |
+| `--max-duration` | Audio-only: max seconds per cue after punctuation split |
 
 ## Python API
 

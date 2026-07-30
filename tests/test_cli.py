@@ -35,6 +35,36 @@ def test_cli_offset_flags():
     assert args.no_auto_offset is True
 
 
+def test_cli_allows_audio_only():
+    parser = build_parser()
+    args = parser.parse_args(["media.mp3", "--language", "en"])
+    assert str(args.media) == "media.mp3"
+    assert args.subtitle is None
+    assert args.max_words is None
+    assert args.max_chars is None
+    assert args.max_duration is None
+
+
+def test_cli_max_line_limit_flags():
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "media.mp3",
+            "--language",
+            "en",
+            "--max-words",
+            "12",
+            "--max-chars",
+            "42",
+            "--max-duration",
+            "8",
+        ]
+    )
+    assert args.max_words == 12
+    assert args.max_chars == 42
+    assert args.max_duration == 8.0
+
+
 def test_cli_missing_files_returns_error():
-    code = main(["/no/such/media.wav", "/no/such.srt", "--language", "en"])
+    code = main(["/no/such/media.wav", "--language", "en"])
     assert code == 1

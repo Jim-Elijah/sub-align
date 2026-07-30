@@ -14,7 +14,13 @@ def build_parser() -> argparse.ArgumentParser:
         description="Align SRT/LRC/TXT subtitles to audio/video with WhisperX forced alignment.",
     )
     parser.add_argument("media", type=Path, help="Audio or video file")
-    parser.add_argument("subtitle", type=Path, help="Subtitle file (.srt, .lrc, or .txt)")
+    parser.add_argument(
+        "subtitle",
+        type=Path,
+        nargs="?",
+        default=None,
+        help="Optional subtitle file (.srt, .lrc, or .txt) for forced alignment",
+    )
     parser.add_argument(
         "-o",
         "--output",
@@ -53,8 +59,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--model",
         default="small",
         help=(
-            "Whisper model name or local path for .txt windows and .srt/.lrc "
-            "auto-offset (default: small)"
+            "Whisper model name or local path for ASR and .txt windows and "
+            ".srt/.lrc auto-offset (default: small)"
         ),
     )
     parser.add_argument(
@@ -89,6 +95,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable automatic global offset estimation for .srt/.lrc",
     )
     parser.add_argument(
+        "--max-words",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Audio-only: max words per cue after punctuation split "
+            "(e.g. 12); omit to keep full sentences"
+        ),
+    )
+    parser.add_argument(
+        "--max-chars",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Audio-only: max characters per cue after punctuation split "
+            "(e.g. 42); omit to keep full sentences"
+        ),
+    )
+    parser.add_argument(
+        "--max-duration",
+        type=float,
+        default=None,
+        metavar="SEC",
+        help=(
+            "Audio-only: max seconds per cue after punctuation split "
+            "(e.g. 8); omit to keep full sentences"
+        ),
+    )
+    parser.add_argument(
         "--print-progress",
         action="store_true",
         help="Print WhisperX alignment progress",
@@ -100,6 +136,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.max_words is not None and args.max_words < 1:
+        parser.error("--max-words must be >= 1")
+    if args.max_chars is not None and args.max_chars < 1:
+        parser.error("--max-chars must be >= 1")
+    if args.max_duration is not None and args.max_duration <= 0:
+        parser.error("--max-duration must be > 0")
     try:
         out = align_file(
             media=args.media,
@@ -117,6 +159,9 @@ def main(argv: list[str] | None = None) -> int:
             offset=args.offset,
             auto_offset=not args.no_auto_offset,
             print_progress=args.print_progress,
+            max_words=args.max_words,
+            max_chars=args.max_chars,
+            max_duration=args.max_duration,
         )
     except Exception as exc:  # noqa: BLE001 - CLI boundary
         print(f"error: {exc}", file=sys.stderr)

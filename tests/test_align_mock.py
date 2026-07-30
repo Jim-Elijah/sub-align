@@ -95,6 +95,216 @@ def test_align_requires_language(tmp_path: Path):
         align_file(media=media, subtitle=subtitle, detect_language=False)
 
 
+def test_align_file_audio_only_transcribes(tmp_path: Path):
+    from sub_align.align import align_file
+
+    media = tmp_path / "a.wav"
+    media.write_bytes(b"RIFF")
+    out = tmp_path / "out.srt"
+
+    fake_audio = np.zeros(16_000 * 3, dtype=np.float32)
+    fake_wx = MagicMock()
+    fake_model = MagicMock()
+    fake_model.transcribe.return_value = {
+        "segments": [
+            {"text": "Hello", "start": 1.0, "end": 1.4},
+            {"text": "World", "start": 1.5, "end": 1.9},
+        ]
+    }
+    fake_wx.load_model.return_value = fake_model
+    fake_wx.load_align_model.return_value = (MagicMock(), {"language": "en"})
+    fake_wx.align.return_value = {
+        "segments": [
+            {
+                "text": "Hello",
+                "start": 1.0,
+                "end": 1.4,
+                "words": [{"word": "Hello", "start": 1.0, "end": 1.4}],
+            },
+            {
+                "text": "World",
+                "start": 1.5,
+                "end": 1.9,
+                "words": [{"word": "World", "start": 1.5, "end": 1.9}],
+            },
+        ]
+    }
+
+    with (
+        patch.dict(sys.modules, {"whisperx": fake_wx}),
+        patch("sub_align.align.load_audio", return_value=fake_audio),
+    ):
+        result = align_file(
+            media=media,
+            subtitle=None,
+            output=out,
+            language="en",
+            device="cpu",
+        )
+
+    assert result == out
+    fake_wx.load_model.assert_called_once()
+    fake_wx.load_align_model.assert_called_once()
+    fake_wx.align.assert_called_once()
+    cues = srt.load(out)
+    assert [c.text for c in cues] == ["Hello", "World"]
+    assert abs(cues[0].start - 1.0) < 1e-6
+    assert abs(cues[1].end - 1.9) < 1e-6
+
+
+def test_align_file_audio_only_splits_long_transcription(tmp_path: Path):
+    from sub_align.align import align_file
+
+    media = tmp_path / "a.wav"
+    media.write_bytes(b"RIFF")
+    out = tmp_path / "out.srt"
+
+    text = (
+        "Hello everyone and welcome back to the show. "
+        "Today we are going to talk about how to build a consistent learning habit "
+        "without burning out after the first few days."
+    )
+    fake_audio = np.zeros(16_000 * 20, dtype=np.float32)
+    fake_wx = MagicMock()
+    fake_model = MagicMock()
+    fake_model.transcribe.return_value = {"segments": [{"text": text, "start": 1.0, "end": 12.0}]}
+    fake_wx.load_model.return_value = fake_model
+    fake_wx.load_align_model.return_value = (MagicMock(), {"language": "en"})
+    # Even proportional fallback still works if align returns no words.
+    fake_wx.align.return_value = {"segments": [{"text": text, "start": 1.0, "end": 12.0}]}
+
+    with (
+        patch.dict(sys.modules, {"whisperx": fake_wx}),
+        patch("sub_align.align.load_audio", return_value=fake_audio),
+    ):
+        result = align_file(
+            media=media,
+            subtitle=None,
+            output=out,
+            language="en",
+            device="cpu",
+        )
+
+    assert result == out
+    cues = srt.load(out)
+    # Default: strong punctuation only → two sentences, second stays whole.
+    assert len(cues) == 2
+    assert cues[0].text.rstrip().endswith(".")
+    assert "learning habit" in cues[1].text
+    assert cues[1].start >= cues[0].end
+    assert abs(cues[-1].end - 12.0) < 1e-6
+
+
+def test_align_file_audio_only_length_limits_split_further(tmp_path: Path):
+    from sub_align.align import align_file
+
+    media = tmp_path / "a.wav"
+    media.write_bytes(b"RIFF")
+    out = tmp_path / "out.srt"
+
+    text = (
+        "Today we are going to talk about how to build a consistent learning habit "
+        "without burning out after the first few days."
+    )
+    fake_audio = np.zeros(16_000 * 20, dtype=np.float32)
+    fake_wx = MagicMock()
+    fake_model = MagicMock()
+    fake_model.transcribe.return_value = {"segments": [{"text": text, "start": 1.0, "end": 12.0}]}
+    fake_wx.load_model.return_value = fake_model
+    fake_wx.load_align_model.return_value = (MagicMock(), {"language": "en"})
+    fake_wx.align.return_value = {"segments": [{"text": text, "start": 1.0, "end": 12.0}]}
+
+    with (
+        patch.dict(sys.modules, {"whisperx": fake_wx}),
+        patch("sub_align.align.load_audio", return_value=fake_audio),
+    ):
+        result = align_file(
+            media=media,
+            subtitle=None,
+            output=out,
+            language="en",
+            device="cpu",
+            max_words=12,
+            max_chars=42,
+        )
+
+    assert result == out
+    cues = srt.load(out)
+    assert len(cues) >= 2
+    assert all(len(c.text.split()) <= 12 for c in cues)
+    assert cues[1].start >= cues[0].end
+
+
+def test_align_file_audio_only_keeps_short_cues_and_uses_word_times(tmp_path: Path):
+    from sub_align.align import align_file
+
+    media = tmp_path / "a.wav"
+    media.write_bytes(b"RIFF")
+    out = tmp_path / "out.srt"
+
+    text = (
+        "Oh, I don't know if you've heard, but someone moved into that old house "
+        "down the road. Yeah, I know."
+    )
+    words = [
+        {"word": "Oh,", "start": 8.1, "end": 8.3},
+        {"word": "I", "start": 8.3, "end": 8.4},
+        {"word": "don't", "start": 8.4, "end": 8.6},
+        {"word": "know", "start": 8.6, "end": 8.8},
+        {"word": "if", "start": 8.8, "end": 8.9},
+        {"word": "you've", "start": 8.9, "end": 9.1},
+        {"word": "heard,", "start": 9.1, "end": 9.5},
+        {"word": "but", "start": 9.6, "end": 9.8},
+        {"word": "someone", "start": 9.8, "end": 10.2},
+        {"word": "moved", "start": 10.2, "end": 10.5},
+        {"word": "into", "start": 10.5, "end": 10.7},
+        {"word": "that", "start": 10.7, "end": 10.9},
+        {"word": "old", "start": 10.9, "end": 11.1},
+        {"word": "house", "start": 11.1, "end": 11.4},
+        {"word": "down", "start": 11.4, "end": 11.6},
+        {"word": "the", "start": 11.6, "end": 11.7},
+        {"word": "road.", "start": 11.7, "end": 12.1},
+        {"word": "Yeah,", "start": 12.3, "end": 12.6},
+        {"word": "I", "start": 12.6, "end": 12.7},
+        {"word": "know.", "start": 12.7, "end": 13.2},
+    ]
+    fake_audio = np.zeros(16_000 * 20, dtype=np.float32)
+    fake_wx = MagicMock()
+    fake_model = MagicMock()
+    fake_model.transcribe.return_value = {"segments": [{"text": text, "start": 8.1, "end": 13.2}]}
+    fake_wx.load_model.return_value = fake_model
+    fake_wx.load_align_model.return_value = (MagicMock(), {"language": "en"})
+    fake_wx.align.return_value = {
+        "segments": [{"text": text, "start": 8.1, "end": 13.2, "words": words}]
+    }
+
+    with (
+        patch.dict(sys.modules, {"whisperx": fake_wx}),
+        patch("sub_align.align.load_audio", return_value=fake_audio),
+    ):
+        result = align_file(
+            media=media,
+            subtitle=None,
+            output=out,
+            language="en",
+            device="cpu",
+        )
+
+    assert result == out
+    cues = srt.load(out)
+    texts = [c.text for c in cues]
+    assert any(t == "Yeah, I know." or t.endswith("Yeah, I know.") for t in texts)
+    # Short reply must stay its own cue, not merged into the previous sentence.
+    yeah_i = next(i for i, t in enumerate(texts) if "Yeah, I know." in t)
+    assert texts[yeah_i].strip() == "Yeah, I know."
+    # Default keeps the full sentence through "road."
+    first = cues[0]
+    assert "road." in first.text
+    assert "Yeah" not in first.text
+    assert abs(first.end - 12.1) < 1e-6
+    assert cues[yeah_i].start >= 12.0
+
+
 def test_align_txt_uses_transcription_windows(tmp_path: Path):
     from sub_align.align import align_file
 

@@ -129,6 +129,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print WhisperX alignment progress",
     )
+    parser.add_argument(
+        "--no-timings",
+        action="store_true",
+        help="Disable step timing messages on stderr",
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
 
@@ -162,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
             max_words=args.max_words,
             max_chars=args.max_chars,
             max_duration=args.max_duration,
+            log_timings=not args.no_timings,
         )
     except Exception as exc:  # noqa: BLE001 - CLI boundary
         print(f"error: {exc}", file=sys.stderr)

@@ -10,6 +10,7 @@ from sub_align.audio import audio_duration, load_audio, trim_audio
 from sub_align.device import default_compute_type, resolve_device
 from sub_align.formats import lrc, srt, txt
 from sub_align.models import Cue
+from sub_align.timing import Timings
 from sub_align.vad import detect_speech_spans
 from sub_align.windows import assign_windows
 
@@ -1159,6 +1160,7 @@ def align_file(
     max_words: int | None = None,
     max_chars: int | None = None,
     max_duration: float | None = None,
+    log_timings: bool = False,
 ) -> Path:
     """
     Align subtitle timestamps to media, or transcribe media when no subtitle is given.
@@ -1181,8 +1183,13 @@ def align_file(
     transcription. ``.txt`` inputs ignore these options (windows come from
     transcription already).
 
+    When ``log_timings`` is True, step durations are printed to stderr
+    (CLI enables this by default; pass ``--no-timings`` to disable).
+
     Returns the output path written.
     """
+    timings = Timings(enabled=log_timings)
+
     media_path = Path(media)
     subtitle_path = Path(subtitle) if subtitle is not None else None
     if not media_path.is_file():
@@ -1203,10 +1210,11 @@ def align_file(
     resolved = resolve_device(device)
     ctype = default_compute_type(resolved, compute_type)
 
-    full_audio = load_audio(media_path)
-    full_duration = audio_duration(full_audio)
-    audio = trim_audio(full_audio, trim_start=trim_start, trim_end=trim_end)
-    duration = audio_duration(audio)
+    with timings.step("load_audio"):
+        full_audio = load_audio(media_path)
+        full_duration = audio_duration(full_audio)
+        audio = trim_audio(full_audio, trim_start=trim_start, trim_end=trim_end)
+        duration = audio_duration(audio)
     cue_time_offset = trim_start
 
     try:
@@ -1217,43 +1225,53 @@ def align_file(
             "pip install 'sub-align[align]' (or [cpu]/[gpu])"
         ) from exc
 
-    lang = language or _detect_language(audio, resolved, ctype)
+    if language is None:
+        with timings.step("detect_language"):
+            lang = _detect_language(audio, resolved, ctype)
+    else:
+        lang = language
 
     if subtitle_path is None:
-        model = whisperx.load_model(model_name, resolved, compute_type=ctype, language=lang)
-        transcription = model.transcribe(audio, language=lang, batch_size=16)
+        with timings.step("load_whisper_model"):
+            model = whisperx.load_model(model_name, resolved, compute_type=ctype, language=lang)
+        with timings.step("transcribe"):
+            transcription = model.transcribe(audio, language=lang, batch_size=16)
         asr_segments = transcription.get("segments") or []
         # Word-align ASR so split cues use real word boundaries instead of
         # proportional timing within each Whisper segment.
         if asr_segments:
-            align_model, metadata = whisperx.load_align_model(
-                language_code=lang,
-                device=resolved,
-            )
-            asr_aligned = whisperx.align(
-                asr_segments,
-                align_model,
-                metadata,
-                audio,
-                resolved,
-                return_char_alignments=False,
-                print_progress=print_progress,
-            )
+            with timings.step("load_align_model"):
+                align_model, metadata = whisperx.load_align_model(
+                    language_code=lang,
+                    device=resolved,
+                )
+            with timings.step("align_asr"):
+                asr_aligned = whisperx.align(
+                    asr_segments,
+                    align_model,
+                    metadata,
+                    audio,
+                    resolved,
+                    return_char_alignments=False,
+                    print_progress=print_progress,
+                )
             asr_segments = _segments_with_word_times(asr_segments, asr_aligned)
-        split_segments = _split_transcription_segments(
-            asr_segments,
-            language=lang,
-            max_words=max_words,
-            max_chars=max_chars,
-            max_duration=max_duration,
-        )
-        updated = _cues_from_transcription(split_segments)
-        if not updated:
-            raise ValueError("No timed transcription segments found in media")
-        if fill_gaps:
-            updated = _fill_gaps(updated, audio_duration=duration)
-        updated = _shift_cues(updated, cue_time_offset)
-        _write_cues(out_path, updated)
+        with timings.step("postprocess"):
+            split_segments = _split_transcription_segments(
+                asr_segments,
+                language=lang,
+                max_words=max_words,
+                max_chars=max_chars,
+                max_duration=max_duration,
+            )
+            updated = _cues_from_transcription(split_segments)
+            if not updated:
+                raise ValueError("No timed transcription segments found in media")
+            if fill_gaps:
+                updated = _fill_gaps(updated, audio_duration=duration)
+            updated = _shift_cues(updated, cue_time_offset)
+            _write_cues(out_path, updated)
+        timings.finish()
         return out_path
 
     # Cue times for .srt/.lrc are on the original timeline; shift into the
@@ -1272,29 +1290,34 @@ def align_file(
             for cue in cues
         ]
 
-    align_model, metadata = whisperx.load_align_model(
-        language_code=lang,
-        device=resolved,
-    )
+    with timings.step("load_align_model"):
+        align_model, metadata = whisperx.load_align_model(
+            language_code=lang,
+            device=resolved,
+        )
 
     if use_transcription_windows:
         # Transcribe for rough windows, then word-align the ASR text so long
         # multi-sentence segments are not evenly interpolated across pauses.
         # Script text is still what we force-align onto the audio next.
-        speech_spans = detect_speech_spans(audio)
-        model = whisperx.load_model(model_name, resolved, compute_type=ctype, language=lang)
-        transcription = model.transcribe(audio, language=lang, batch_size=16)
+        with timings.step("vad"):
+            speech_spans = detect_speech_spans(audio)
+        with timings.step("load_whisper_model"):
+            model = whisperx.load_model(model_name, resolved, compute_type=ctype, language=lang)
+        with timings.step("transcribe"):
+            transcription = model.transcribe(audio, language=lang, batch_size=16)
         asr_segments = transcription.get("segments") or []
         if asr_segments:
-            asr_aligned = whisperx.align(
-                asr_segments,
-                align_model,
-                metadata,
-                audio,
-                resolved,
-                return_char_alignments=False,
-                print_progress=print_progress,
-            )
+            with timings.step("align_asr"):
+                asr_aligned = whisperx.align(
+                    asr_segments,
+                    align_model,
+                    metadata,
+                    audio,
+                    resolved,
+                    return_char_alignments=False,
+                    print_progress=print_progress,
+                )
             asr_segments = _segments_with_word_times(asr_segments, asr_aligned)
         segments = build_script_align_segments(
             cues,
@@ -1311,8 +1334,10 @@ def align_file(
             applied_offset = float(offset)
             offset_source = "manual"
         elif auto_offset:
-            model = whisperx.load_model(model_name, resolved, compute_type=ctype, language=lang)
-            transcription = model.transcribe(audio, language=lang, batch_size=16)
+            with timings.step("load_whisper_model"):
+                model = whisperx.load_model(model_name, resolved, compute_type=ctype, language=lang)
+            with timings.step("transcribe"):
+                transcription = model.transcribe(audio, language=lang, batch_size=16)
             asr_segments = transcription.get("segments") or []
             applied_offset = estimate_global_offset(cues, asr_segments)
             offset_source = "auto"
@@ -1336,30 +1361,33 @@ def align_file(
         # word remapping still assigns times back onto the original cues.
         segments, groups = _merge_align_segments(cues, segments)
 
-    result = whisperx.align(
-        segments,
-        align_model,
-        metadata,
-        audio,
-        resolved,
-        return_char_alignments=False,
-        print_progress=print_progress,
-    )
+    with timings.step("force_align"):
+        result = whisperx.align(
+            segments,
+            align_model,
+            metadata,
+            audio,
+            resolved,
+            return_char_alignments=False,
+            print_progress=print_progress,
+        )
     aligned = result.get("segments") or []
     word_segments = result.get("word_segments") or None
-    updated = _trim_overlaps(
-        _apply_aligned_times(
-            cues,
-            aligned,
-            word_segments=word_segments,
-            search_segments=search_segments,
-            groups=groups,
+    with timings.step("postprocess"):
+        updated = _trim_overlaps(
+            _apply_aligned_times(
+                cues,
+                aligned,
+                word_segments=word_segments,
+                search_segments=search_segments,
+                groups=groups,
+            )
         )
-    )
-    if fill_gaps:
-        updated = _fill_gaps(updated, audio_duration=duration)
-    updated = _shift_cues(updated, cue_time_offset)
-    _write_cues(out_path, updated)
+        if fill_gaps:
+            updated = _fill_gaps(updated, audio_duration=duration)
+        updated = _shift_cues(updated, cue_time_offset)
+        _write_cues(out_path, updated)
+    timings.finish()
     return out_path
 
 

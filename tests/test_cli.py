@@ -65,6 +65,12 @@ def test_cli_max_line_limit_flags():
     assert args.max_duration == 8.0
 
 
+def test_cli_no_timings_flag():
+    parser = build_parser()
+    args = parser.parse_args(["media.mp3", "--language", "en", "--no-timings"])
+    assert args.no_timings is True
+
+
 def test_cli_missing_files_returns_error():
     code = main(["/no/such/media.wav", "--language", "en"])
     assert code == 1

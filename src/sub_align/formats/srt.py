@@ -74,11 +74,15 @@ def loads(content: str) -> list[Cue]:
 
 
 def dumps(cues: list[Cue]) -> str:
-    """Serialize cues to SRT text (standard HH:MM:SS,mmm)."""
+    """Serialize cues to SRT text (standard HH:MM:SS,mmm).
+
+    Cue numbers are always rewritten as 1..n in file order, regardless of
+    ``cue.index`` on the input objects.
+    """
     parts: list[str] = []
-    for cue in cues:
+    for i, cue in enumerate(cues, start=1):
         parts.append(
-            f"{cue.index}\n"
+            f"{i}\n"
             f"{_format_timestamp(cue.start)} --> {_format_timestamp(cue.end)}\n"
             f"{cue.text}\n"
         )
@@ -90,4 +94,6 @@ def load(path: str | Path) -> list[Cue]:
 
 
 def dump(path: str | Path, cues: list[Cue]) -> None:
+    for i, cue in enumerate(cues, start=1):
+        cue.index = i
     Path(path).write_text(dumps(cues), encoding="utf-8")

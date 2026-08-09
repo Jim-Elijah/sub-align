@@ -87,10 +87,30 @@ def test_lrc_wide_in_narrow_out():
     assert "[02:00.05]Fourth" in dumped
 
 
-def test_srt_dump_preserves_index(tmp_path):
+def test_srt_dump_renumbers_from_one(tmp_path):
     path = tmp_path / "a.srt"
-    cues = [Cue(index=7, text="Only", start=1.234, end=2.345)]
+    cues = [
+        Cue(index=643, text="First", start=1.234, end=2.345),
+        Cue(index=650, text="Second", start=3.0, end=4.0),
+    ]
     srt.dump(path, cues)
+    assert cues[0].index == 1
+    assert cues[1].index == 2
     loaded = srt.load(path)
-    assert loaded[0].index == 7
-    assert "Only" in path.read_text(encoding="utf-8")
+    assert [c.index for c in loaded] == [1, 2]
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("1\n")
+    assert "\n2\n" in text
+
+
+def test_lrc_dump_renumbers_cue_index(tmp_path):
+    path = tmp_path / "a.lrc"
+    cues = [
+        Cue(index=643, text="First", start=1.0, end=3.5),
+        Cue(index=650, text="Second", start=3.5, end=5.0),
+    ]
+    lrc.dump(path, cues)
+    assert [c.index for c in cues] == [1, 2]
+    loaded = lrc.load(path)
+    assert [c.index for c in loaded] == [1, 2]
+    assert [c.text for c in loaded] == ["First", "Second"]

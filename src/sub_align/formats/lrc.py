@@ -75,7 +75,10 @@ def loads(
 
 
 def dumps(cues: list[Cue]) -> str:
-    """Serialize cues to LRC text (start timestamps only, standard format)."""
+    """Serialize cues to LRC text (start timestamps only, standard format).
+
+    LRC has no index field; a round-trip via ``loads`` assigns 1..n.
+    """
     lines = [_format_timestamp(cue.start) + cue.text for cue in cues]
     return "\n".join(lines) + ("\n" if lines else "")
 
@@ -94,4 +97,6 @@ def load(
 
 
 def dump(path: str | Path, cues: list[Cue]) -> None:
+    for i, cue in enumerate(cues, start=1):
+        cue.index = i
     Path(path).write_text(dumps(cues), encoding="utf-8")

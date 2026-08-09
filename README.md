@@ -1,31 +1,41 @@
-# Sub-align — align SRT/LRC/TXT subtitles to audio/video with WhisperX
+# Sub-align
 
-Force-align existing subtitle text to media so cues track speech even when
-the file has leading/trailing silence or local drift. Unlike tools that only
-shift the whole timeline (e.g. ffsubsync), this package maps each cue onto
-detected speech and then runs WhisperX phoneme alignment.
+[![CI Status](https://github.com/Jim-Elijah/sub-align/actions/workflows/ci.yml/badge.svg)](https://github.com/Jim-Elijah/sub-align/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-maroon.svg)](https://opensource.org/licenses/MIT)
+[![Python Versions](https://img.shields.io/pypi/pyversions/sub-align.svg)](https://pypi.org/project/sub-align)
+[![PyPI Version](https://img.shields.io/pypi/v/sub-align.svg)](https://pypi.org/project/sub-align)
 
-## Features
+Align `.srt` / `.lrc` / `.txt` subtitles (or generate them) to audio/video with
+[WhisperX](https://github.com/m-bain/whisperX) forced alignment — so each cue can
+move independently instead of only applying one global timeline shift.
 
-- Formats: `.srt`, `.lrc`, `.txt`
-- Automatic strategy by input type:
-  - `.txt`: Whisper transcription for rough time windows, then WhisperX forced
-    align on the **original script lines** (not ASR wording)
-  - `.srt` / `.lrc`: estimate a global timeline offset (or use `--offset`), expand
-    by a margin, then refine with WhisperX
-- Devices: `auto` / `cpu` / `cuda`
-- CLI and Python API
-- Packaged for PyPI (`sub-align`)
+## Why not only a global offset?
 
-## Requirements
+Tools like [ffsubsync](https://github.com/smacke/ffsubsync) typically find a
+constant offset (or stretch) between speech activity and subtitle “on” times.
+That works well for whole-track drift, but leading/trailing silence or local
+timing errors can still leave lines early or late.
 
-- Python 3.10+
-- [ffmpeg](https://ffmpeg.org/) on `PATH`
-- Enough disk/RAM for WhisperX alignment models on first run
+`sub-align` picks a strategy from the input type, then runs **WhisperX
+phoneme / word-level forced alignment** so each line is refined against the
+audio:
+
+| Input | Strategy |
+|-------|----------|
+| Media only | Whisper ASR → word-align → split into timed cues |
+| `.txt` script | ASR only for search windows → forced-align **original lines** |
+| `.srt` / `.lrc` | Optional global offset → expand windows by `--margin` → forced-align |
+
+**Limitation:** subtitle text must roughly match spoken content. Alignment does
+not translate or correct wrong words.
+
+More detail: [docs/pipeline.md](docs/pipeline.md) · scenarios & flags:
+[docs/usage.md](docs/usage.md)
 
 ## Install
 
-### From PyPI
+Requires **Python 3.10+** and [ffmpeg](https://ffmpeg.org/) on `PATH`. First run
+downloads WhisperX alignment models (disk/RAM).
 
 ```bash
 pip install 'sub-align[align]'
@@ -36,57 +46,53 @@ uv pip install 'sub-align[align]'
 Extras `[align]`, `[cpu]`, and `[gpu]` all install WhisperX. Install a matching
 PyTorch build first when you need a specific CPU/CUDA wheel:
 
-**CPU torch, then align stack:**
-
 ```bash
+# CPU
 uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 uv pip install 'sub-align[cpu]'
-```
 
-**CUDA torch, then align stack:**
-
-```bash
+# CUDA (example: cu124)
 uv pip install torch --index-url https://download.pytorch.org/whl/cu124
 uv pip install 'sub-align[gpu]'
 ```
 
-### Development (uv)
+### Development
 
 ```bash
 uv venv
-uv sync --group dev          # unit tests / lint (no WhisperX)
+uv sync --group dev                 # unit tests / lint (no WhisperX)
 uv sync --group dev --extra align   # full local alignment
 uv run pytest
 uv run ruff check src tests
 ```
 
-## CLI
+## Usage
 
 ```bash
+# Timed subtitles: auto global offset + per-cue refine
 sub-align media.mp4 subs.srt --language zh -o out.srt
+
+# Lyrics (LRC): same strategy as SRT
 sub-align audio.wav lyrics.lrc --language en --margin 1.0
+
+# Untimed script: ASR windows, then force-align original lines
 sub-align media.mkv script.txt --language en --model small
+
+# Skip podcast intro/outro before aligning a script
 sub-align media.mp3 script.txt --language en --trim-start 13 --trim-end 5
+
+# Known whole-track shift (skips auto-offset ASR)
 sub-align media.mkv subs.srt --language en --offset 12.5
-sub-align media.mkv subs.srt --detect-language --device cuda
+
+# Audio only: transcribe + word-align into an SRT
+sub-align lecture.mp4 --language en -o lecture.asr.srt
 ```
 
-| Flag | Meaning |
-|------|---------|
-| `--language` | Alignment model language (`en`, `zh`, …) |
-| `--detect-language` | Use a tiny Whisper model when language is omitted |
-| `--margin` | Search-window padding in seconds |
-| `--device` | `auto`, `cpu`, or `cuda` |
-| `--model` | Whisper model for `.txt` windows and `.srt`/`.lrc` auto-offset (default: `small`) |
-| `--compute-type` | Override default (`float16` on CUDA, `int8` on CPU) |
-| `--fill-gaps` | Extend each cue end to the next cue start (last cue ends at audio duration) |
-| `--trim-start` | Seconds to drop from media start before alignment (e.g. podcast intro) |
-| `--trim-end` | Seconds to drop from media end before alignment (e.g. outro) |
-| `--offset` | Constant seconds to shift `.srt`/`.lrc` cues before refine (skips auto-offset) |
-| `--no-auto-offset` | Disable automatic global offset estimation for `.srt`/`.lrc` |
-| `--max-words` | Audio-only: max words per cue after punctuation split (omit = full sentences) |
-| `--max-chars` | Audio-only: max characters per cue after punctuation split |
-| `--max-duration` | Audio-only: max seconds per cue after punctuation split |
+Always pass `--language` (e.g. `en`, `zh`) or `--detect-language`.
+
+See [docs/usage.md](docs/usage.md) for when to use `--model`, `--margin`,
+`--offset`, `--fill-gaps`, `--trim-*`, audio-only line limits, and a Whisper
+model size / VRAM cheat sheet.
 
 ## Python API
 
@@ -95,34 +101,24 @@ from sub_align import align_file
 
 align_file(
     media="a.mp4",
-    subtitle="a.srt",
+    subtitle="a.srt",   # omit for audio-only transcription
     output="a.aligned.srt",
     language="zh",
     device="auto",
 )
 ```
 
-For `subtitle` input, strategy is chosen automatically:
+## How it works (short)
 
-- `.txt` inputs are transcribed only to estimate search windows; forced alignment
-  uses each original script line as segment text
-- `.srt` and `.lrc` inputs first apply a constant timeline offset (auto-estimated
-  from Whisper transcription, or `--offset`), then reuse the shifted timestamps
-  as refine windows
+1. Load media as 16 kHz mono audio (via WhisperX / ffmpeg); optional
+   `--trim-start` / `--trim-end`.
+2. Resolve language (`--language` or tiny-model detection).
+3. Build search windows by input type (ASR token match for `.txt`; offset +
+   margin refine for `.srt`/`.lrc`; full ASR for media-only).
+4. Run WhisperX forced alignment; remap word times onto original cues; trim
+   overlaps; optional `--fill-gaps`; write `.srt` or `.lrc`.
 
-## How it differs from ffsubsync
-
-ffsubsync typically applies a global offset or linear stretch. With leading or
-trailing silence that can slide the whole subtitle track incorrectly.
-`sub-align` chooses its alignment strategy from the subtitle format: plain-text
-`.txt` inputs are transcribed to estimate per-line search windows, then each
-original script line is force-aligned inside those windows; `.srt` and
-`.lrc` inputs apply one global offset when needed, then refine locally inside
-expanded original windows. It then runs WhisperX forced alignment so each line
-can move independently instead of only applying one global shift.
-
-**Limitation:** subtitle text must roughly match spoken content. Alignment does
-not correct wrong words.
+Full diagram and tech notes: [docs/pipeline.md](docs/pipeline.md).
 
 ## Build and publish
 
@@ -132,7 +128,7 @@ uv publish   # requires PyPI credentials / UV_PUBLISH_TOKEN
 ```
 
 GitHub Actions publishes on tags matching `v*` (see `.github/workflows/publish.yml`).
-Configure either Trusted Publishing on PyPI or repository secret `UV_PUBLISH_TOKEN`.
+Configure Trusted Publishing on PyPI or repository secret `UV_PUBLISH_TOKEN`.
 
 ## License
 

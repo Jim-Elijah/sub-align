@@ -5,7 +5,7 @@ description = "Align LRC/SRT subtitles to audio/video using WhisperX forced alig
 readme = "README.md"
 license = "MIT"
 authors = [
-    { name = "jim-wsl", email = "waczzrr@163.com" }
+    { name = "Jim-Elija", email = "willelijah.x@gmail.com" }
 ]
 requires-python = ">=3.10"
 keywords = ["subtitle", "whisperx", "alignment", "srt", "lrc", "forced-alignment"]
@@ -34,9 +34,9 @@ gpu = ["whisperx>=3.3.0"]
 sub-align = "sub_align.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/jim-wsl/sub-align"
-Repository = "https://github.com/jim-wsl/sub-align"
-Issues = "https://github.com/jim-wsl/sub-align/issues"
+Homepage = " https://github.com/Jim-Elijah/sub-align"
+Repository = "https://github.com/Jim-Elijah/sub-align"
+Issues = "https://github.com/Jim-Elijah/sub-align/issues"
 
 [build-system]
 requires = ["hatchling"]

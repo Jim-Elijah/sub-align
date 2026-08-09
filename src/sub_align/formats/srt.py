@@ -82,9 +82,7 @@ def dumps(cues: list[Cue]) -> str:
     parts: list[str] = []
     for i, cue in enumerate(cues, start=1):
         parts.append(
-            f"{i}\n"
-            f"{_format_timestamp(cue.start)} --> {_format_timestamp(cue.end)}\n"
-            f"{cue.text}\n"
+            f"{i}\n{_format_timestamp(cue.start)} --> {_format_timestamp(cue.end)}\n{cue.text}\n"
         )
     return "\n".join(parts).rstrip() + "\n"
 

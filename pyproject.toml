@@ -1,6 +1,6 @@
 [project]
 name = "sub-align"
-version = "0.2.1"
+version = "0.2.2"
 description = "Align LRC/SRT subtitles to audio/video using WhisperX forced alignment"
 readme = "README.md"
 license = "MIT"
@@ -83,7 +83,7 @@ select = ["E", "F", "I", "W", "UP"]
 
 [tool.commitizen]
 name = "cz_conventional_commits"
-version = "0.2.1"
+version = "0.2.2"
 version_files = ["pyproject.toml:^version"]
 tag_format = "v$version"
 update_changelog_on_bump = true

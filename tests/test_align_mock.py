@@ -47,8 +47,15 @@ World
     fake_wx.load_align_model.return_value = (MagicMock(), {"language": "en"})
     fake_wx.align.return_value = {
         "segments": [
-            {"text": "Hello", "start": 1.0, "end": 1.4},
-            {"text": "World", "start": 1.5, "end": 1.9},
+            {
+                "text": "Hello World",
+                "start": 1.0,
+                "end": 1.9,
+                "words": [
+                    {"word": "Hello", "start": 1.0, "end": 1.4},
+                    {"word": "World", "start": 1.5, "end": 1.9},
+                ],
+            }
         ]
     }
     fake_model = MagicMock()
@@ -78,6 +85,8 @@ World
 
     assert result == out
     assert fake_wx.align.called
+    # Short cues are merged for FA.
+    assert len(fake_wx.align.call_args.args[0]) == 1
     cues = srt.load(out)
     assert abs(cues[0].start - 1.0) < 1e-6
     assert abs(cues[1].end - 1.9) < 1e-6
@@ -950,8 +959,15 @@ World
     fake_wx.load_align_model.return_value = (MagicMock(), {"language": "en"})
     fake_wx.align.return_value = {
         "segments": [
-            {"text": "Hello", "start": 1.0, "end": 1.4},
-            {"text": "World", "start": 1.5, "end": 1.9},
+            {
+                "text": "Hello World",
+                "start": 1.0,
+                "end": 1.9,
+                "words": [
+                    {"word": "Hello", "start": 1.0, "end": 1.4},
+                    {"word": "World", "start": 1.5, "end": 1.9},
+                ],
+            }
         ]
     }
 
@@ -1116,8 +1132,15 @@ World
     fake_wx.load_align_model.return_value = (MagicMock(), {"language": "en"})
     fake_wx.align.return_value = {
         "segments": [
-            {"text": "Hello", "start": 2.0, "end": 2.4},
-            {"text": "World", "start": 2.5, "end": 2.9},
+            {
+                "text": "Hello World",
+                "start": 2.0,
+                "end": 2.9,
+                "words": [
+                    {"word": "Hello", "start": 2.0, "end": 2.4},
+                    {"word": "World", "start": 2.5, "end": 2.9},
+                ],
+            }
         ]
     }
 
@@ -1140,10 +1163,11 @@ World
 
     # Manual offset must skip transcription.
     fake_wx.load_model.assert_not_called()
-    # Refine windows should be around the shifted cues (~2s / ~3s).
+    # Short cues merge into one FA segment spanning the shifted windows.
     segments = fake_wx.align.call_args.args[0]
+    assert len(segments) == 1
     assert segments[0]["start"] == pytest.approx(1.9, abs=1e-6)
-    assert segments[1]["start"] == pytest.approx(2.9, abs=1e-6)
+    assert "Hello" in segments[0]["text"] and "World" in segments[0]["text"]
 
     cues = srt.load(out)
     assert abs(cues[0].start - 2.0) < 1e-6
@@ -1245,3 +1269,416 @@ def test_align_file_trim_rejects_over_trim(tmp_path: Path):
             trim_start=1.5,
             trim_end=1.0,
         )
+
+
+def test_dialogue_lines_detects_dash_multiline():
+    from sub_align.align import _dialogue_lines
+
+    text = "-Everything is going according to plan.\n-Until it isn't."
+    lines = _dialogue_lines(text)
+    assert lines is not None
+    assert len(lines) == 2
+    assert _dialogue_lines("-Only one speaker line") is None
+    assert _dialogue_lines("No dashes\nJust two lines") is None
+    assert _dialogue_lines("-A\n-B\n-C") is not None
+    assert len(_dialogue_lines("-A\n-B\n-C") or []) == 3
+
+
+def test_expand_dialogue_align_segments_splits_and_floors_tail():
+    from sub_align.align import _MIN_SEARCH_DURATION, _expand_dialogue_align_segments
+    from sub_align.models import Cue
+
+    cue = Cue(
+        1,
+        "-Everything is going according to plan.\n-Until it isn't.",
+        10.0,
+        14.0,
+    )
+    segments = [{"text": cue.text, "start": 9.75, "end": 14.5}]
+    expanded, ranges = _expand_dialogue_align_segments([cue], segments)
+    assert ranges == [(0, 2)]
+    assert len(expanded) == 2
+    assert expanded[0]["text"].startswith("-Everything")
+    assert expanded[1]["text"].startswith("-Until")
+    assert expanded[0]["start"] == pytest.approx(9.75)
+    assert expanded[1]["end"] == pytest.approx(14.5)
+    assert expanded[1]["end"] - expanded[1]["start"] >= _MIN_SEARCH_DURATION - 1e-9
+    assert expanded[0]["end"] <= expanded[1]["start"] + 1e-9
+
+
+def test_clamp_refine_starts_restores_original_when_fa_enters_silence():
+    from sub_align.align import _clamp_refine_starts
+    from sub_align.models import Cue
+
+    original = [Cue(1, "Hello there", 2.0, 3.5)]
+    # FA pulled ~1s earlier into silence; speech starts at 2.0
+    aligned = [Cue(1, "Hello there", 1.0, 3.5)]
+    search = [{"text": "Hello there", "start": 0.75, "end": 4.0}]
+    speech_spans = [(2.0, 3.6)]
+    fixed = _clamp_refine_starts(
+        original,
+        aligned,
+        search_segments=search,
+        speech_spans=speech_spans,
+    )
+    assert fixed[0].start == pytest.approx(2.0)
+
+
+def test_clamp_refine_starts_snaps_forward_to_speech():
+    from sub_align.align import _clamp_refine_starts
+    from sub_align.models import Cue
+
+    original = [Cue(1, "Hi", 0.5, 2.0)]  # also in silence
+    aligned = [Cue(1, "Hi", 0.5, 2.0)]
+    search = [{"text": "Hi", "start": 0.25, "end": 2.5}]
+    speech_spans = [(1.2, 2.0)]
+    fixed = _clamp_refine_starts(
+        original,
+        aligned,
+        search_segments=search,
+        speech_spans=speech_spans,
+    )
+    assert fixed[0].start == pytest.approx(1.2)
+
+
+def test_align_file_splits_dialogue_cue_for_force_align(tmp_path: Path):
+    media = tmp_path / "a.wav"
+    media.write_bytes(b"RIFF")
+    subtitle = tmp_path / "a.srt"
+    srt.dump(
+        subtitle,
+        srt.loads(
+            """1
+00:00:10,000 --> 00:00:14,000
+-Everything is going according to plan.
+-Until it isn't.
+"""
+        ),
+    )
+    out = tmp_path / "out.srt"
+
+    # Speech from 10s–14s; leading silence so VAD clamp has a clear island.
+    fake_audio = np.zeros(16_000 * 16, dtype=np.float32)
+    fake_audio[10 * 16_000 : 14 * 16_000] = 0.25
+
+    fake_wx = MagicMock()
+    fake_wx.load_align_model.return_value = (MagicMock(), {"language": "en"})
+
+    def fake_align(segments, *args, **kwargs):
+        # Expect two per-line segments for the dialogue cue.
+        assert len(segments) == 2
+        assert segments[0]["text"].startswith("-Everything")
+        assert segments[1]["text"].startswith("-Until")
+        return {
+            "segments": [
+                {
+                    "text": segments[0]["text"],
+                    "start": 10.0,
+                    "end": 13.2,
+                    "words": [
+                        {"word": "Everything", "start": 10.0, "end": 10.4},
+                        {"word": "is", "start": 10.4, "end": 10.5},
+                        {"word": "going", "start": 10.5, "end": 10.8},
+                        {"word": "according", "start": 10.8, "end": 11.2},
+                        {"word": "to", "start": 11.2, "end": 11.3},
+                        {"word": "plan", "start": 11.3, "end": 13.2},
+                    ],
+                },
+                {
+                    "text": segments[1]["text"],
+                    "start": 13.2,
+                    "end": 14.0,
+                    "words": [
+                        {"word": "Until", "start": 13.2, "end": 13.5},
+                        {"word": "it", "start": 13.5, "end": 13.6},
+                        {"word": "isn't", "start": 13.6, "end": 14.0},
+                    ],
+                },
+            ]
+        }
+
+    fake_wx.align.side_effect = fake_align
+
+    with (
+        patch.dict(sys.modules, {"whisperx": fake_wx}),
+        patch("sub_align.align.load_audio", return_value=fake_audio),
+    ):
+        from sub_align.align import align_file
+
+        result = align_file(
+            media=media,
+            subtitle=subtitle,
+            output=out,
+            language="en",
+            device="cpu",
+            margin=0.5,
+            auto_offset=False,
+        )
+
+    assert result == out
+    cues = srt.load(out)
+    assert len(cues) == 1
+    assert cues[0].start == pytest.approx(10.0, abs=0.05)
+    assert cues[0].end == pytest.approx(14.0, abs=0.05)
+    assert "Until it isn't" in cues[0].text
+
+
+def test_align_file_clamps_early_start_into_silence(tmp_path: Path):
+    media = tmp_path / "a.wav"
+    media.write_bytes(b"RIFF")
+    subtitle = tmp_path / "a.srt"
+    srt.dump(
+        subtitle,
+        srt.loads(
+            """1
+00:00:02,000 --> 00:00:03,500
+Hello there
+"""
+        ),
+    )
+    out = tmp_path / "out.srt"
+
+    fake_audio = np.zeros(16_000 * 5, dtype=np.float32)
+    fake_audio[2 * 16_000 : int(3.5 * 16_000)] = 0.3
+
+    fake_wx = MagicMock()
+    fake_wx.load_align_model.return_value = (MagicMock(), {"language": "en"})
+    # FA incorrectly places start ~1s earlier into silence.
+    fake_wx.align.return_value = {
+        "segments": [
+            {
+                "text": "Hello there",
+                "start": 1.0,
+                "end": 3.5,
+                "words": [
+                    {"word": "Hello", "start": 1.0, "end": 1.4},
+                    {"word": "there", "start": 1.4, "end": 3.5},
+                ],
+            }
+        ]
+    }
+
+    with (
+        patch.dict(sys.modules, {"whisperx": fake_wx}),
+        patch("sub_align.align.load_audio", return_value=fake_audio),
+    ):
+        from sub_align.align import align_file
+
+        align_file(
+            media=media,
+            subtitle=subtitle,
+            output=out,
+            language="en",
+            device="cpu",
+            margin=0.5,
+            auto_offset=False,
+        )
+
+    cues = srt.load(out)
+    assert cues[0].start == pytest.approx(2.0, abs=0.15)
+
+
+def test_prefer_original_short_cues_keeps_collapsed_fa():
+    from sub_align.align import _prefer_original_short_cues
+    from sub_align.models import Cue
+
+    original = [
+        Cue(1, "Yes.", 11.464, 11.950),
+        Cue(2, "Longer line that should keep FA times", 12.0, 14.0),
+    ]
+    aligned = [
+        Cue(1, "Yes.", 12.100, 12.100),
+        Cue(2, "Longer line that should keep FA times", 12.2, 13.8),
+    ]
+    fixed = _prefer_original_short_cues(original, aligned)
+    assert fixed[0].start == pytest.approx(11.464)
+    assert fixed[0].end == pytest.approx(11.950)
+    assert fixed[1].start == pytest.approx(12.2)
+    assert fixed[1].end == pytest.approx(13.8)
+
+
+def test_prefer_original_short_cues_keeps_ballooned_window():
+    from sub_align.align import _prefer_original_short_cues
+    from sub_align.models import Cue
+
+    original = [Cue(1, "Yes.", 11.464, 11.950)]
+    # Thin-repair fallback to a wide search window.
+    aligned = [Cue(1, "Yes.", 11.214, 12.450)]
+    fixed = _prefer_original_short_cues(original, aligned)
+    assert fixed[0].start == pytest.approx(11.464)
+    assert fixed[0].end == pytest.approx(11.950)
+
+
+def test_prefer_original_short_cues_ignores_untimed():
+    from sub_align.align import _prefer_original_short_cues
+    from sub_align.models import Cue
+
+    original = [Cue(1, "Yes.", 0.0, 0.0)]
+    aligned = [Cue(1, "Yes.", 1.0, 1.2)]
+    fixed = _prefer_original_short_cues(original, aligned)
+    assert fixed[0].start == pytest.approx(1.0)
+    assert fixed[0].end == pytest.approx(1.2)
+
+
+def test_repair_collapsed_cues_restores_original():
+    from sub_align.align import _repair_collapsed_cues
+    from sub_align.models import Cue
+
+    original = [Cue(1, "No.", 12.020, 12.427)]
+    aligned = [Cue(1, "No.", 12.100, 12.100)]
+    fixed = _repair_collapsed_cues(original, aligned)
+    assert fixed[0].start == pytest.approx(12.020)
+    assert fixed[0].end == pytest.approx(12.427)
+
+
+def test_align_file_srt_merges_short_cues_for_force_align(tmp_path: Path):
+    media = tmp_path / "a.wav"
+    media.write_bytes(b"RIFF")
+    subtitle = tmp_path / "a.srt"
+    srt.dump(
+        subtitle,
+        srt.loads(
+            """1
+00:00:09,217 --> 00:00:11,203
+Really? Would it be totally weird if I used it?
+
+2
+00:00:11,464 --> 00:00:11,950
+Yes.
+
+3
+00:00:12,020 --> 00:00:12,427
+No.
+"""
+        ),
+    )
+    out = tmp_path / "out.srt"
+
+    fake_audio = np.zeros(16_000 * 16, dtype=np.float32)
+    fake_audio[9 * 16_000 : 13 * 16_000] = 0.25
+
+    fake_wx = MagicMock()
+    fake_wx.load_align_model.return_value = (MagicMock(), {"language": "en"})
+
+    def fake_align(segments, *args, **kwargs):
+        # Short Yes/No attach to the previous long cue for FA.
+        assert len(segments) == 1
+        assert "Yes." in segments[0]["text"]
+        assert "No." in segments[0]["text"]
+        return {
+            "segments": [
+                {
+                    "text": segments[0]["text"],
+                    "start": 9.5,
+                    "end": 12.4,
+                    "words": [
+                        {"word": "Really", "start": 9.51, "end": 9.7},
+                        {"word": "Would", "start": 9.8, "end": 10.0},
+                        {"word": "it", "start": 10.0, "end": 10.1},
+                        {"word": "be", "start": 10.1, "end": 10.2},
+                        {"word": "totally", "start": 10.2, "end": 10.5},
+                        {"word": "weird", "start": 10.5, "end": 10.8},
+                        {"word": "if", "start": 10.8, "end": 10.9},
+                        {"word": "I", "start": 10.9, "end": 11.0},
+                        {"word": "used", "start": 11.0, "end": 11.1},
+                        {"word": "it", "start": 11.1, "end": 11.16},
+                        {"word": "Yes", "start": 11.46, "end": 11.9},
+                        {"word": "No", "start": 12.02, "end": 12.4},
+                    ],
+                }
+            ]
+        }
+
+    fake_wx.align.side_effect = fake_align
+
+    with (
+        patch.dict(sys.modules, {"whisperx": fake_wx}),
+        patch("sub_align.align.load_audio", return_value=fake_audio),
+    ):
+        from sub_align.align import align_file
+
+        result = align_file(
+            media=media,
+            subtitle=subtitle,
+            output=out,
+            language="en",
+            device="cpu",
+            margin=0.5,
+            auto_offset=False,
+        )
+
+    assert result == out
+    cues = srt.load(out)
+    assert len(cues) == 3
+    assert cues[1].text == "Yes."
+    assert cues[1].start == pytest.approx(11.46, abs=0.05)
+    assert cues[1].end == pytest.approx(11.9, abs=0.05)
+    assert cues[1].end - cues[1].start >= 0.05
+    assert cues[2].start == pytest.approx(12.02, abs=0.05)
+
+
+def test_align_file_srt_restores_collapsed_short_cue(tmp_path: Path):
+    media = tmp_path / "a.wav"
+    media.write_bytes(b"RIFF")
+    subtitle = tmp_path / "a.srt"
+    srt.dump(
+        subtitle,
+        srt.loads(
+            """1
+00:00:11,464 --> 00:00:11,950
+Yes.
+
+2
+00:00:12,020 --> 00:00:12,427
+No.
+"""
+        ),
+    )
+    out = tmp_path / "out.srt"
+
+    fake_audio = np.zeros(16_000 * 16, dtype=np.float32)
+    fake_audio[11 * 16_000 : 13 * 16_000] = 0.25
+
+    fake_wx = MagicMock()
+    fake_wx.load_align_model.return_value = (MagicMock(), {"language": "en"})
+
+    def fake_align(segments, *args, **kwargs):
+        # Merged short cues, but FA returns a collapsed Yes timestamp.
+        assert len(segments) == 1
+        return {
+            "segments": [
+                {
+                    "text": segments[0]["text"],
+                    "start": 12.1,
+                    "end": 12.3,
+                    "words": [
+                        {"word": "Yes", "start": 12.1, "end": 12.1},
+                        {"word": "No", "start": 12.115, "end": 12.3},
+                    ],
+                }
+            ]
+        }
+
+    fake_wx.align.side_effect = fake_align
+
+    with (
+        patch.dict(sys.modules, {"whisperx": fake_wx}),
+        patch("sub_align.align.load_audio", return_value=fake_audio),
+    ):
+        from sub_align.align import align_file
+
+        align_file(
+            media=media,
+            subtitle=subtitle,
+            output=out,
+            language="en",
+            device="cpu",
+            margin=0.5,
+            auto_offset=False,
+        )
+
+    cues = srt.load(out)
+    assert cues[0].text == "Yes."
+    assert cues[0].end - cues[0].start >= 0.05
+    assert cues[0].start == pytest.approx(11.464, abs=0.05)
+    assert cues[0].end == pytest.approx(11.950, abs=0.05)

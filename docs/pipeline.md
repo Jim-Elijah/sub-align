@@ -24,9 +24,11 @@ flowchart TD
   D -->|.srt / .lrc| M[read original timestamps]
   M --> N[manual or auto global offset]
   N --> O[refine: original window ± margin]
-  O --> L
+  O --> O2[split dash dialogue / merge short cues]
+  O2 --> L
   L --> P[word remap → original cues]
-  P --> Q[trim overlaps]
+  P --> P2[prefer original shorts / VAD clamp / repair collapse]
+  P2 --> Q[trim overlaps]
   Q --> R{fill_gaps?}
   R --> S[add back trim_start]
   S --> T[write .srt / .lrc]
@@ -112,8 +114,15 @@ Format notes:
      `asr_start - cue.start` over token matches; needs ≥3 matches and
      `|offset| ≥ 0.25s`, else 0);
    - `--no-auto-offset` — no constant shift.
-3. `assign_windows(mode="refine")` — each cue’s original span ± `--margin`.
-4. WhisperX forced-align original cue text → word remap → postprocess.
+3. `assign_windows(mode="refine")` — each cue’s original span with end
+   `+ --margin` and a smaller start lead-in (capped at 0.25s).
+4. Multi-line dash dialogue (`-A\n-B` / `-A\n-B\n-C…`) is temporarily split into
+   per-line align segments, then merged back to one cue. When no dialogue split
+   occurs, very short cues (≤3 alnum tokens) are temporarily merged with
+   neighbors for FA (same as `.txt`), then split back via word remapping.
+5. WhisperX forced-align → word remap → prefer original short spans when FA
+   collapsed → **VAD start clamp** → overlap trim → restore any zero-duration
+   leftovers → postprocess.
 
 | Concern | Behavior |
 |---------|----------|
@@ -126,10 +135,12 @@ Format notes:
 | Piece | Role |
 |-------|------|
 | Whisper ASR | Timing anchors (`.txt`, auto-offset) or full transcript (audio-only) |
-| Energy VAD | Narrow bad/oversized `.txt` search windows |
+| Energy VAD | Narrow bad/oversized `.txt` search windows; clamp refine starts out of silence |
 | `SequenceMatcher` | Token alignment script↔ASR (`.txt` windows; also offset matching) |
 | WhisperX forced align | Word-level refine of supplied text against audio |
 | Word remap | Map aligner words back to original cues after WhisperX splits/merges |
+| Dash dialogue split | Temporary per-line FA for multi-line `-…` cues on `.srt`/`.lrc` refine |
+| Short-cue merge | Temporary neighbor merge for ≤3-token cues on `.txt` and non-dialogue `.srt`/`.lrc` |
 
 Forced alignment is **not** machine translation. If the script disagrees with
 what was spoken, timestamps may still attach to the wrong audio; fix the text

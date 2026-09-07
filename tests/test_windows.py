@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from sub_align.models import Cue
 from sub_align.vad import energy_speech_spans
@@ -20,6 +21,21 @@ def test_refine_expands_margin():
     assert segments[0]["start"] == 0.0  # clamped
     assert abs(segments[0]["end"] - 0.75) < 1e-6
     assert abs(segments[1]["start"] - 0.75) < 1e-6
+
+
+def test_refine_start_margin_asymmetric():
+    cues = [
+        Cue(index=1, text="hello", start=2.0, end=3.0),
+    ]
+    segments = assign_windows(
+        cues,
+        mode="refine",
+        margin=0.5,
+        start_margin=0.25,
+        audio_duration=10.0,
+    )
+    assert segments[0]["start"] == pytest.approx(1.75)
+    assert segments[0]["end"] == pytest.approx(3.5)
 
 
 def test_realign_skips_leading_silence():

@@ -42,6 +42,7 @@ def assign_windows(
     *,
     mode: str = "realign",
     margin: float = 0.5,
+    start_margin: float | None = None,
     speech_spans: list[tuple[float, float]] | None = None,
     audio_duration: float | None = None,
 ) -> list[dict]:
@@ -50,6 +51,8 @@ def assign_windows(
 
     - realign: map cues onto VAD speech spans by text length proportion
     - refine: keep original timestamps, expanded by margin
+      (``start_margin`` defaults to ``margin``; callers may pass a smaller
+      lead-in so refine is less likely to pull starts into preceding silence)
     """
     if not cues:
         return []
@@ -57,9 +60,10 @@ def assign_windows(
         raise ValueError(f"Unsupported mode: {mode!r}")
 
     if mode == "refine":
+        lead = margin if start_margin is None else start_margin
         segments: list[dict] = []
         for cue in cues:
-            start = max(0.0, cue.start - margin)
+            start = max(0.0, cue.start - lead)
             end = cue.end + margin
             if audio_duration is not None:
                 end = min(end, audio_duration)

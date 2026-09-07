@@ -32,6 +32,9 @@ _GAP_EDGE_GUARD = 0.5
 _SHORT_CUE_TOKENS = 3
 # Aligned cue shorter than this is treated as failed and repaired from windows.
 _MIN_ALIGNED_DURATION = 0.05
+# Timed short cue: keep original when FA duration falls below this fraction of
+# the original span (and is still under the search-window floor).
+_SHORT_FA_KEEP_RATIO = 0.4
 # Global offset for .srt/.lrc: need enough ASR↔cue matches; ignore tiny drift.
 _MIN_OFFSET_MATCHES = 3
 _MIN_ABS_OFFSET = 0.25
@@ -42,6 +45,12 @@ _TRANSCRIPT_MAX_DURATION = 8.0
 _EN_STRONG_BREAKS = ".?!;"
 _GENERIC_STRONG_BREAKS = "。？！；"
 _SECONDARY_BREAKS = ",:，：、"
+# Refine search: cap lead-in so FA is less likely to latch onto pre-cue silence.
+_REFINE_START_MARGIN_CAP = 0.25
+# Dual/multi dialogue lines in one SRT cue (e.g. "-A\n-B" or "-A\n-B\n-C").
+_DIALOGUE_LINE_RE = re.compile(r"^[-–—]\s*\S")
+# Slack when testing whether a timestamp sits inside a VAD speech span.
+_SPEECH_HIT_SLACK = 0.05
 
 
 def _read_cues(
@@ -778,6 +787,202 @@ def _merge_align_segments(
     return merged, groups
 
 
+def _dialogue_lines(text: str) -> list[str] | None:
+    """
+    Return dash-prefixed dialogue lines when the cue is multi-speaker style.
+
+    Requires ≥2 non-empty lines that all look like ``-…`` / ``–…`` / ``—…``.
+    """
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return None
+    if not all(_DIALOGUE_LINE_RE.match(ln) for ln in lines):
+        return None
+    return lines
+
+
+def _expand_dialogue_align_segments(
+    cues: list[Cue],
+    segments: list[dict],
+) -> tuple[list[dict], list[tuple[int, int]]]:
+    """
+    Split multi-line dash dialogue into per-line WhisperX segments.
+
+    Each line gets a proportional slice of the parent search window (by text
+    length), with a minimum duration floor so a short trailing utterance is not
+    force-aligned alone in a near-zero span. Returns (expanded, cue_ranges)
+    where ``cue_ranges[i] = (lo, hi)`` indexes into ``expanded`` for cue i.
+    """
+    expanded: list[dict] = []
+    ranges: list[tuple[int, int]] = []
+    for cue, seg in zip(cues, segments, strict=True):
+        lines = _dialogue_lines(cue.text)
+        win_start = float(seg["start"])
+        win_end = float(seg["end"])
+        if win_end < win_start + _MIN_WINDOW:
+            win_end = win_start + _MIN_WINDOW
+        lo = len(expanded)
+        if lines is None:
+            expanded.append(
+                {
+                    "text": cue.text,
+                    "start": win_start,
+                    "end": win_end,
+                }
+            )
+            ranges.append((lo, lo + 1))
+            continue
+
+        weights = [max(len(line), 1) for line in lines]
+        total_w = float(sum(weights))
+        span = win_end - win_start
+        # Tentative proportional cuts, then enforce min duration from the end
+        # so a short last line still gets enough audio context.
+        cuts = [win_start]
+        cursor = win_start
+        for j, weight in enumerate(weights):
+            if j == len(weights) - 1:
+                cuts.append(win_end)
+            else:
+                cursor += span * (weight / total_w)
+                cuts.append(cursor)
+
+        # Push last slice to at least _MIN_SEARCH_DURATION when parent allows.
+        if len(lines) >= 2 and span >= _MIN_SEARCH_DURATION:
+            last_lo = cuts[-2]
+            if win_end - last_lo < _MIN_SEARCH_DURATION:
+                cuts[-2] = max(win_start, win_end - _MIN_SEARCH_DURATION)
+                # Keep earlier cuts monotonic.
+                for k in range(len(cuts) - 2, 0, -1):
+                    if cuts[k] < cuts[k - 1]:
+                        cuts[k] = cuts[k - 1]
+                    if cuts[k] > cuts[k + 1]:
+                        cuts[k] = cuts[k + 1]
+
+        for j, line in enumerate(lines):
+            t0 = cuts[j]
+            t1 = cuts[j + 1]
+            if t1 < t0 + _MIN_WINDOW:
+                t1 = min(win_end, t0 + _MIN_WINDOW)
+                if t1 < t0:
+                    t0 = t1
+            expanded.append({"text": line, "start": t0, "end": t1})
+        ranges.append((lo, len(expanded)))
+    return expanded, ranges
+
+
+def _collapse_dialogue_aligned_segments(
+    cues: list[Cue],
+    aligned_segments: list[dict],
+    cue_ranges: list[tuple[int, int]],
+) -> list[dict]:
+    """Merge per-line aligned segments back to one segment per original cue."""
+    collapsed: list[dict] = []
+    for cue, (lo, hi) in zip(cues, cue_ranges, strict=True):
+        parts = aligned_segments[lo:hi]
+        if not parts:
+            collapsed.append({"text": cue.text, "start": cue.start, "end": cue.end})
+            continue
+        starts = [float(p["start"]) for p in parts if p.get("start") is not None]
+        ends = [float(p["end"]) for p in parts if p.get("end") is not None]
+        start = min(starts) if starts else cue.start
+        end = max(ends) if ends else cue.end
+        if end < start:
+            end = start
+        words: list[dict] = []
+        for part in parts:
+            words.extend(part.get("words") or [])
+        item: dict = {"text": cue.text, "start": start, "end": end}
+        if words:
+            item["words"] = words
+        collapsed.append(item)
+    return collapsed
+
+
+def _time_in_speech(
+    t: float,
+    speech_spans: list[tuple[float, float]],
+    *,
+    slack: float = _SPEECH_HIT_SLACK,
+) -> bool:
+    for start, end in speech_spans:
+        if start - slack <= t <= end + slack:
+            return True
+    return False
+
+
+def _first_speech_in_range(
+    win_start: float,
+    win_end: float,
+    speech_spans: list[tuple[float, float]],
+) -> float | None:
+    """Earliest speech onset overlapping ``[win_start, win_end]``."""
+    if win_end <= win_start:
+        return None
+    best: float | None = None
+    for start, end in speech_spans:
+        if end <= win_start or start >= win_end:
+            continue
+        hit = max(start, win_start)
+        if best is None or hit < best:
+            best = hit
+    return best
+
+
+def _clamp_refine_starts(
+    original: list[Cue],
+    aligned: list[Cue],
+    *,
+    search_segments: list[dict],
+    speech_spans: list[tuple[float, float]],
+) -> list[Cue]:
+    """
+    Keep refine from pulling cue starts earlier into silence.
+
+    If FA moved start earlier while the original start already sits on speech
+    and the new start does not, restore the original start. Otherwise snap a
+    silent FA start forward to the first speech onset in the search window.
+    """
+    if not speech_spans or not aligned:
+        return aligned
+    updated: list[Cue] = []
+    for i, cue in enumerate(aligned):
+        orig = original[i] if i < len(original) else cue
+        if i < len(search_segments):
+            win_start = float(search_segments[i].get("start", cue.start))
+            win_end = float(search_segments[i].get("end", cue.end))
+        else:
+            win_start, win_end = cue.start, cue.end
+        if win_end < win_start:
+            win_end = win_start
+
+        new_start = cue.start
+        orig_ok = _time_in_speech(orig.start, speech_spans)
+        fa_ok = _time_in_speech(cue.start, speech_spans)
+
+        if cue.start < orig.start - 1e-3 and orig_ok and not fa_ok:
+            new_start = orig.start
+        elif not fa_ok:
+            snapped = _first_speech_in_range(
+                max(win_start, cue.start),
+                max(win_end, cue.end),
+                speech_spans,
+            )
+            if snapped is None:
+                snapped = _first_speech_in_range(win_start, win_end, speech_spans)
+            if snapped is not None and snapped > cue.start:
+                new_start = snapped
+            elif cue.start < orig.start - 1e-3 and orig_ok:
+                new_start = orig.start
+
+        new_end = cue.end if cue.end >= new_start else new_start
+        if new_start != cue.start or new_end != cue.end:
+            updated.append(Cue(index=cue.index, text=cue.text, start=new_start, end=new_end))
+        else:
+            updated.append(cue)
+    return updated
+
+
 def _collect_words(
     aligned_segments: list[dict],
     word_segments: list[dict] | None,
@@ -975,6 +1180,73 @@ def _repair_thin_cues(
     return updated
 
 
+def _prefer_original_short_cues(
+    original: list[Cue],
+    aligned: list[Cue],
+    *,
+    max_tokens: int = _SHORT_CUE_TOKENS,
+) -> list[Cue]:
+    """
+    For short timed cues, keep the original span when FA collapses or balloons.
+
+    Untimed cues (original duration ≤ 0) are left unchanged so .txt paths still
+    rely on FA / window repair. Legitimate short-cue corrections (moved but
+    still a plausible duration) are kept.
+    """
+    if not original or not aligned:
+        return aligned
+    updated: list[Cue] = []
+    for orig, cue in zip(original, aligned, strict=True):
+        orig_dur = orig.end - orig.start
+        if orig_dur <= 0 or len(_alnum_tokens(orig.text)) > max_tokens:
+            updated.append(cue)
+            continue
+        fa_dur = cue.end - cue.start
+        # Collapsed / zero-duration FA.
+        if fa_dur < _MIN_ALIGNED_DURATION:
+            updated.append(Cue(index=cue.index, text=cue.text, start=orig.start, end=orig.end))
+            continue
+        # Thin-repair / bad remap blew the short cue up to a wide search window.
+        if fa_dur > max(orig_dur * 2.0, orig_dur + 0.35) and orig_dur < _MIN_SEARCH_DURATION:
+            updated.append(Cue(index=cue.index, text=cue.text, start=orig.start, end=orig.end))
+            continue
+        # Snapped far away with a still-tiny span.
+        if (
+            abs(cue.start - orig.start) > max(orig_dur, 0.35)
+            and fa_dur < orig_dur * _SHORT_FA_KEEP_RATIO
+        ):
+            updated.append(Cue(index=cue.index, text=cue.text, start=orig.start, end=orig.end))
+            continue
+        updated.append(cue)
+    return updated
+
+
+def _repair_collapsed_cues(
+    original: list[Cue],
+    aligned: list[Cue],
+) -> list[Cue]:
+    """
+    Restore cues left with zero/near-zero duration after clamp or overlap trim.
+
+    Prefers the original timed span when available; otherwise pads to the
+    minimum aligned duration so the timeline never keeps ``start == end``.
+    """
+    if not aligned:
+        return aligned
+    updated: list[Cue] = []
+    for i, cue in enumerate(aligned):
+        if cue.end - cue.start >= _MIN_ALIGNED_DURATION:
+            updated.append(cue)
+            continue
+        orig = original[i] if i < len(original) else cue
+        if orig.end - orig.start >= _MIN_ALIGNED_DURATION:
+            updated.append(Cue(index=cue.index, text=cue.text, start=orig.start, end=orig.end))
+            continue
+        end = cue.start + _MIN_ALIGNED_DURATION
+        updated.append(Cue(index=cue.index, text=cue.text, start=cue.start, end=end))
+    return updated
+
+
 def _apply_aligned_times(
     cues: list[Cue],
     aligned_segments: list[dict],
@@ -982,6 +1254,7 @@ def _apply_aligned_times(
     *,
     search_segments: list[dict] | None = None,
     groups: list[list[int]] | None = None,
+    dialogue_ranges: list[tuple[int, int]] | None = None,
 ) -> list[Cue]:
     """
     Apply WhisperX alignment times back onto original cues.
@@ -989,10 +1262,19 @@ def _apply_aligned_times(
     WhisperX splits multi-sentence cues into separate segments, so index-aligned
     mapping is wrong. Prefer word-level remapping; fall back to 1:1 (or group
     proportional split) when words are unavailable (e.g. mocks).
+
+    ``dialogue_ranges`` maps each cue to a half-open index range into
+    ``aligned_segments`` when multi-line dash dialogue was expanded for FA.
     """
+    segments_for_map = aligned_segments
+    if dialogue_ranges is not None and any(hi - lo > 1 for lo, hi in dialogue_ranges):
+        segments_for_map = _collapse_dialogue_aligned_segments(
+            cues, aligned_segments, dialogue_ranges
+        )
+
     fallback_src = search_segments if search_segments is not None else []
     if not fallback_src and groups is None:
-        fallback_src = aligned_segments
+        fallback_src = segments_for_map
     fallback_windows = (
         _cue_window_fallback(cues, fallback_src)
         if fallback_src
@@ -1011,8 +1293,8 @@ def _apply_aligned_times(
             )
 
     if groups is not None and any(len(g) > 1 for g in groups):
-        return _apply_groups_proportional(cues, aligned_segments, groups)
-    return _apply_one_to_one(cues, aligned_segments)
+        return _apply_groups_proportional(cues, segments_for_map, groups)
+    return _apply_one_to_one(cues, segments_for_map)
 
 
 def _trim_overlaps(cues: list[Cue]) -> list[Cue]:
@@ -1347,19 +1629,34 @@ def align_file(
                 f"sub-align: applied global offset {applied_offset:+.3f}s ({offset_source})",
                 file=sys.stderr,
             )
+        with timings.step("vad"):
+            speech_spans = detect_speech_spans(audio)
+        start_margin = min(margin, _REFINE_START_MARGIN_CAP)
         segments = assign_windows(
             cues,
             mode="refine",
             margin=margin,
+            start_margin=start_margin,
             audio_duration=duration,
         )
 
     search_segments = segments
     groups: list[list[int]] | None = None
+    dialogue_ranges: list[tuple[int, int]] | None = None
     if use_transcription_windows:
         # Short script lines get a wider align span by merging with neighbors;
         # word remapping still assigns times back onto the original cues.
         segments, groups = _merge_align_segments(cues, segments)
+    else:
+        # Multi-line "-A / -B [/ -C …]" cues: align each line, then merge times.
+        # When no cue was split, also merge short monosyllable cues (Yes/No) so
+        # WhisperX is not forced to align them in isolation.
+        segments, dialogue_ranges = _expand_dialogue_align_segments(cues, segments)
+        if any(hi - lo > 1 for lo, hi in dialogue_ranges):
+            groups = None
+        else:
+            dialogue_ranges = None
+            segments, groups = _merge_align_segments(cues, segments)
 
     with timings.step("force_align"):
         result = whisperx.align(
@@ -1374,15 +1671,29 @@ def align_file(
     aligned = result.get("segments") or []
     word_segments = result.get("word_segments") or None
     with timings.step("postprocess"):
-        updated = _trim_overlaps(
-            _apply_aligned_times(
-                cues,
-                aligned,
-                word_segments=word_segments,
-                search_segments=search_segments,
-                groups=groups,
-            )
+        updated = _apply_aligned_times(
+            cues,
+            aligned,
+            word_segments=word_segments,
+            search_segments=search_segments,
+            groups=groups,
+            dialogue_ranges=dialogue_ranges,
         )
+        if not use_transcription_windows:
+            # Timed refine: keep original short cues when FA clearly failed.
+            updated = _prefer_original_short_cues(cues, updated)
+            if speech_spans:
+                updated = _clamp_refine_starts(
+                    cues,
+                    updated,
+                    search_segments=search_segments,
+                    speech_spans=speech_spans,
+                )
+            updated = _trim_overlaps(updated)
+            # Clamp/trim can collapse a short cue to start==end; restore it.
+            updated = _repair_collapsed_cues(cues, updated)
+        else:
+            updated = _trim_overlaps(updated)
         if fill_gaps:
             updated = _fill_gaps(updated, audio_duration=duration)
         updated = _shift_cues(updated, cue_time_offset)

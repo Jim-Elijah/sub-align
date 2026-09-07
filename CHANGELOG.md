@@ -1,3 +1,14 @@
+## Unreleased
+
+### Fix
+
+- refine: merge short ``.srt``/``.lrc`` cues before forced alignment (same as ``.txt``)
+- refine: keep original short-cue times when FA collapses or shrinks them badly
+- refine: restore cues left at ``start == end`` after VAD clamp / overlap trim
+- refine: clamp cue starts that forced-alignment pulls into pre-cue silence (VAD)
+- refine: temporarily split multi-line ``-A / -B [/ -C…]`` dialogue for FA, then merge
+- refine: use a smaller start-side search margin (capped at 0.25s) to reduce lead-in drift
+
 ## v0.2.0 (2026-08-09)
 
 ### Feat

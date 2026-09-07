@@ -88,7 +88,10 @@ World
     # Short cues are merged for FA.
     assert len(fake_wx.align.call_args.args[0]) == 1
     cues = srt.load(out)
-    assert abs(cues[0].start - 1.0) < 1e-6
+    # Short timed cues restore original starts when FA moves later; overlap trim
+    # then keeps cue0 end at the next cue start.
+    assert abs(cues[0].start - 0.0) < 1e-6
+    assert abs(cues[0].end - 1.0) < 1e-6
     assert abs(cues[1].end - 1.9) < 1e-6
     assert cues[0].text == "Hello"
 
@@ -1015,7 +1018,9 @@ World
         )
 
     cues = srt.load(out)
-    assert abs(cues[0].end - 1.5) < 1e-6
+    # Prefer-original short starts leave cue0 ending at the next cue start;
+    # fill_gaps then extends the last cue to audio end.
+    assert abs(cues[0].end - 1.0) < 1e-6
     assert abs(cues[1].end - 3.0) < 1e-6
 
 

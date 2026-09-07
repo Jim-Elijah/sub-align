@@ -330,8 +330,9 @@ def test_fixture_path_c_srt_refine(tmp_path: Path, clip1_audio: np.ndarray, clip
     assert len(cues) == 11
     assert cues[0].text.strip() == "Hello."
     assert "Alright" in cues[1].text or "All right" in cues[1].text
-    # Drifted cue started at 0.7s; refine/offset should land near speech (~1.7s).
-    assert cues[0].start == pytest.approx(1.7, abs=0.8)
+    # Short cue keeps original start when FA moves later; auto-offset (~-0.285s)
+    # shifts the drifted 0.7s onset, rather than snapping to speech (~1.7s).
+    assert cues[0].start == pytest.approx(0.415, abs=0.15)
     assert cues[4].text.startswith("The quick brown fox")
     assert all(c.end >= c.start for c in cues)
 

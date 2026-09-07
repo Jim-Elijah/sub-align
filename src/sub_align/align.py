@@ -30,6 +30,8 @@ _GAP_EDGE_GUARD = 0.5
 # Cues at or below this token count are temporarily merged with neighbors for
 # WhisperX alignment, then split back via word remapping.
 _SHORT_CUE_TOKENS = 3
+# Do not merge a short cue across a larger inter-cue pause (seconds).
+_SHORT_MERGE_MAX_GAP = 1.5
 # Aligned cue shorter than this is treated as failed and repaired from windows.
 _MIN_ALIGNED_DURATION = 0.05
 # Timed short cue: keep original when FA duration falls below this fraction of
@@ -726,16 +728,30 @@ def build_script_align_segments(
     return segments
 
 
+def _short_merge_allowed(
+    left: Cue,
+    right: Cue,
+    *,
+    max_gap: float = _SHORT_MERGE_MAX_GAP,
+) -> bool:
+    """True when two cues may share a WhisperX window (untimed always ok)."""
+    if left.end - left.start <= 0 or right.end - right.start <= 0:
+        return True
+    return (right.start - left.end) <= max_gap
+
+
 def _group_short_cues(
     cues: list[Cue],
     *,
     max_tokens: int = _SHORT_CUE_TOKENS,
+    max_gap: float = _SHORT_MERGE_MAX_GAP,
 ) -> list[list[int]]:
     """
     Group cue indices for temporary merge.
 
-    Short cues attach to the previous group when possible; leading shorts absorb
-    the following cue so they are never aligned alone.
+    Short cues attach to the previous group when close in time; otherwise they
+    absorb the following cue when that gap is also small. Large pauses keep
+    short cues in their own FA window so remap does not drift across silence.
     """
     n = len(cues)
     if n == 0:
@@ -748,16 +764,18 @@ def _group_short_cues(
             groups.append([i])
             i += 1
             continue
-        if groups:
+        if groups and _short_merge_allowed(cues[groups[-1][-1]], cues[i], max_gap=max_gap):
             groups[-1].append(i)
             i += 1
             continue
         group = [i]
         i += 1
-        while i < n and short[i]:
+        while (
+            i < n and short[i] and _short_merge_allowed(cues[group[-1]], cues[i], max_gap=max_gap)
+        ):
             group.append(i)
             i += 1
-        if i < n:
+        if i < n and _short_merge_allowed(cues[group[-1]], cues[i], max_gap=max_gap):
             group.append(i)
             i += 1
         groups.append(group)
@@ -769,9 +787,10 @@ def _merge_align_segments(
     segments: list[dict],
     *,
     max_tokens: int = _SHORT_CUE_TOKENS,
+    max_gap: float = _SHORT_MERGE_MAX_GAP,
 ) -> tuple[list[dict], list[list[int]]]:
     """Merge short-cue segments for WhisperX; return (merged, groups)."""
-    groups = _group_short_cues(cues, max_tokens=max_tokens)
+    groups = _group_short_cues(cues, max_tokens=max_tokens, max_gap=max_gap)
     if all(len(g) == 1 for g in groups):
         return segments, groups
 
@@ -939,9 +958,10 @@ def _clamp_refine_starts(
     """
     Keep refine from pulling cue starts earlier into silence.
 
-    If FA moved start earlier while the original start already sits on speech
-    and the new start does not, restore the original start. Otherwise snap a
-    silent FA start forward to the first speech onset in the search window.
+    Roles: FA may move starts later than the timed original (early cues);
+    VAD only blocks an earlier pull into silence. Never push a start later
+    than ``orig.start`` via VAD — energy VAD often misses soft onsets and
+    would swallow leading words (e.g. snap to a louder mid-phrase peak).
     """
     if not speech_spans or not aligned:
         return aligned
@@ -950,30 +970,25 @@ def _clamp_refine_starts(
         orig = original[i] if i < len(original) else cue
         if i < len(search_segments):
             win_start = float(search_segments[i].get("start", cue.start))
-            win_end = float(search_segments[i].get("end", cue.end))
         else:
-            win_start, win_end = cue.start, cue.end
-        if win_end < win_start:
-            win_end = win_start
+            win_start = cue.start
 
         new_start = cue.start
-        orig_ok = _time_in_speech(orig.start, speech_spans)
-        fa_ok = _time_in_speech(cue.start, speech_spans)
-
-        if cue.start < orig.start - 1e-3 and orig_ok and not fa_ok:
-            new_start = orig.start
-        elif not fa_ok:
-            snapped = _first_speech_in_range(
-                max(win_start, cue.start),
-                max(win_end, cue.end),
-                speech_spans,
-            )
-            if snapped is None:
-                snapped = _first_speech_in_range(win_start, win_end, speech_spans)
-            if snapped is not None and snapped > cue.start:
-                new_start = snapped
-            elif cue.start < orig.start - 1e-3 and orig_ok:
-                new_start = orig.start
+        # Only constrain FA when it moved earlier than the timed cue.
+        if cue.start < orig.start - 1e-3:
+            orig_ok = _time_in_speech(orig.start, speech_spans)
+            fa_ok = _time_in_speech(cue.start, speech_spans)
+            if not fa_ok:
+                if orig_ok:
+                    new_start = orig.start
+                else:
+                    # Both in silence: snap forward inside [FA, orig], never past orig.
+                    snapped = _first_speech_in_range(
+                        max(win_start, cue.start),
+                        orig.start,
+                        speech_spans,
+                    )
+                    new_start = snapped if snapped is not None else orig.start
 
         new_end = cue.end if cue.end >= new_start else new_start
         if new_start != cue.start or new_end != cue.end:
@@ -1189,9 +1204,10 @@ def _prefer_original_short_cues(
     """
     For short timed cues, keep the original span when FA collapses or balloons.
 
-    Untimed cues (original duration ≤ 0) are left unchanged so .txt paths still
-    rely on FA / window repair. Legitimate short-cue corrections (moved but
-    still a plausible duration) are kept.
+    Also keep the original start when FA moves later (short words amplify a
+    few tens of ms into a swallowed onset). Untimed cues (duration ≤ 0) are
+    left unchanged so .txt paths still rely on FA / window repair. FA starts
+    earlier than the original are left for VAD clamp / other repair.
     """
     if not original or not aligned:
         return aligned
@@ -1216,6 +1232,11 @@ def _prefer_original_short_cues(
             and fa_dur < orig_dur * _SHORT_FA_KEEP_RATIO
         ):
             updated.append(Cue(index=cue.index, text=cue.text, start=orig.start, end=orig.end))
+            continue
+        # FA started later: restore timed onset (keep FA end when still usable).
+        if cue.start > orig.start + 1e-3:
+            end = cue.end if cue.end > orig.start else orig.end
+            updated.append(Cue(index=cue.index, text=cue.text, start=orig.start, end=end))
             continue
         updated.append(cue)
     return updated

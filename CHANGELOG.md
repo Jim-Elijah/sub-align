@@ -2,10 +2,14 @@
 
 ### Fix
 
-- refine: merge short ``.srt``/``.lrc`` cues before forced alignment (same as ``.txt``)
+- refine: merge short ``.srt``/``.lrc`` cues before forced alignment only when
+  the inter-cue pause is small (≲1.5s); large gaps keep short cues alone
+- refine: keep original short-cue start when FA moves later (avoids swallowed
+  onsets on Yes/Okay-style lines)
 - refine: keep original short-cue times when FA collapses or shrinks them badly
 - refine: restore cues left at ``start == end`` after VAD clamp / overlap trim
-- refine: clamp cue starts that forced-alignment pulls into pre-cue silence (VAD)
+- refine: VAD start clamp only blocks FA pulling *earlier* into silence; never
+  snaps start later than the timed cue (energy VAD soft-onset misses)
 - refine: temporarily split multi-line ``-A / -B [/ -C…]`` dialogue for FA, then merge
 - refine: use a smaller start-side search margin (capped at 0.25s) to reduce lead-in drift
 

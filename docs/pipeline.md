@@ -86,7 +86,9 @@ Default output names:
    - enforce a minimum search duration (~0.5s);
    - expand each window by `--margin`.
 4. Temporarily merge very short cues (≤3 alnum tokens) with neighbors so
-   forced alignment has enough context; times are remapped to original lines.
+   forced alignment has enough context **when the inter-cue pause is small**
+   (~≤1.5s); large gaps keep short cues alone. Times are remapped to original
+   lines.
 5. WhisperX forced-align with **`text = original script line`** (not ASR wording).
 6. Word remap → overlap trim → optional fill-gaps.
 
@@ -119,10 +121,13 @@ Format notes:
 4. Multi-line dash dialogue (`-A\n-B` / `-A\n-B\n-C…`) is temporarily split into
    per-line align segments, then merged back to one cue. When no dialogue split
    occurs, very short cues (≤3 alnum tokens) are temporarily merged with
-   neighbors for FA (same as `.txt`), then split back via word remapping.
+   close neighbors for FA (pause ≲1.5s; large gaps stay alone), then split back
+   via word remapping.
 5. WhisperX forced-align → word remap → prefer original short spans when FA
-   collapsed → **VAD start clamp** → overlap trim → restore any zero-duration
-   leftovers → postprocess.
+   collapsed or FA start is later than the timed onset → **VAD start clamp**
+   (only blocks FA pulling *earlier* into silence; never snaps start later
+   than the timed original — soft onsets) → overlap trim → restore any
+   zero-duration leftovers → postprocess.
 
 | Concern | Behavior |
 |---------|----------|
@@ -135,12 +140,12 @@ Format notes:
 | Piece | Role |
 |-------|------|
 | Whisper ASR | Timing anchors (`.txt`, auto-offset) or full transcript (audio-only) |
-| Energy VAD | Narrow bad/oversized `.txt` search windows; clamp refine starts out of silence |
+| Energy VAD | Narrow bad/oversized `.txt` search windows; on refine, only block FA starts pulled earlier into silence (FA may still move starts later) |
 | `SequenceMatcher` | Token alignment script↔ASR (`.txt` windows; also offset matching) |
 | WhisperX forced align | Word-level refine of supplied text against audio |
 | Word remap | Map aligner words back to original cues after WhisperX splits/merges |
 | Dash dialogue split | Temporary per-line FA for multi-line `-…` cues on `.srt`/`.lrc` refine |
-| Short-cue merge | Temporary neighbor merge for ≤3-token cues on `.txt` and non-dialogue `.srt`/`.lrc` |
+| Short-cue merge | Temporary neighbor merge for ≤3-token cues when pause ≲1.5s (`.txt` and non-dialogue `.srt`/`.lrc`) |
 
 Forced alignment is **not** machine translation. If the script disagrees with
 what was spoken, timestamps may still attach to the wrong audio; fix the text
@@ -157,16 +162,19 @@ Honest constraints of the current pipeline (not a full bug list):
   alignment may still nudge boundaries; a second pass often keeps a stable
   (including stably wrong) result.
 - **Short cues are fragile.** Cues with ≤3 alphanumeric tokens may be
-  temporarily merged with neighbors for WhisperX, then split back via word
-  remapping. Boundaries after remap can be imperfect; refine may prefer the
-  original short span when FA collapses it.
+  temporarily merged with close neighbors for WhisperX, then split back via
+  word remapping. Large pauses skip that merge. Boundaries after remap can
+  still be imperfect; refine prefers the original short start when FA moves
+  later, and the original span when FA collapses it.
 - **Multi-line dialogue is heuristic, not diarization.** Lines like
   `-A` / `-B` / `-C` are temporarily split for FA on refine, then merged into
   one cue. There is no speaker ID model; cues that mix speakers without that
   dash pattern stay one align unit.
 - **VAD is approximate.** Energy VAD (used to narrow `.txt` windows and to
-  clamp refine starts out of silence) can miss soft speech or pick the wrong
-  island in noisy / music-heavy audio.
+  block refine starts pulled earlier into silence) can miss soft speech or
+  pick the wrong island in noisy / music-heavy audio. Refine therefore does
+  not use VAD to push starts later than the timed cue (that used to swallow
+  soft leading words).
 - **Auto-offset needs enough matches.** Global offset estimation needs several
   cue↔ASR token hits and ignores tiny drift; weak ASR or sparse dialogue can
   yield `0` or a poor shift — use `--offset` / `--no-auto-offset` when you know

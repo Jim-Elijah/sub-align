@@ -28,7 +28,8 @@ audio:
 
 **Limitations:** subtitle text must roughly match spoken content (no
 translation). Refine can still nudge already-good cues; very short lines may be
-merged with neighbors for alignment; there is no speaker diarization. See
+merged with close neighbors (large pauses stay alone); VAD only blocks refine
+starts pulled earlier into silence. There is no speaker diarization. See
 [docs/pipeline.md § Limitations](docs/pipeline.md#limitations).
 
 More detail: [docs/pipeline.md](docs/pipeline.md) · scenarios & flags:

@@ -711,6 +711,32 @@ def test_group_short_cues_attaches_to_neighbors():
     assert merged[0]["text"] == "So are we all ready to go? Yep. I think so."
 
 
+def test_group_short_cues_skips_large_timed_gap():
+    from sub_align.align import _group_short_cues
+    from sub_align.models import Cue
+
+    cues = [
+        Cue(1, "The quick brown fox jumps over the lazy dog near the river.", 15.712, 18.654),
+        Cue(2, "Okay.", 24.277, 24.637),
+        Cue(3, "Please wait here until I come back.", 26.218, 27.839),
+    ]
+    groups = _group_short_cues(cues)
+    assert groups == [[0], [1], [2]]
+
+
+def test_group_short_cues_merges_across_small_timed_gap():
+    from sub_align.align import _group_short_cues
+    from sub_align.models import Cue
+
+    cues = [
+        Cue(1, "Really? Would it be totally weird if I used it?", 9.217, 11.203),
+        Cue(2, "Yes.", 11.464, 11.950),
+        Cue(3, "No.", 12.020, 12.427),
+    ]
+    groups = _group_short_cues(cues)
+    assert groups == [[0, 1, 2]]
+
+
 def test_apply_aligned_times_merges_split_sentences():
     """WhisperX splits multi-sentence cues; times must remap onto original cues."""
     from sub_align.align import _apply_aligned_times
@@ -1324,14 +1350,51 @@ def test_clamp_refine_starts_restores_original_when_fa_enters_silence():
     assert fixed[0].start == pytest.approx(2.0)
 
 
-def test_clamp_refine_starts_snaps_forward_to_speech():
+def test_clamp_refine_starts_keeps_fa_later_than_original():
     from sub_align.align import _clamp_refine_starts
     from sub_align.models import Cue
 
-    original = [Cue(1, "Hi", 0.5, 2.0)]  # also in silence
-    aligned = [Cue(1, "Hi", 0.5, 2.0)]
+    # Early timed cue; FA corrected later onto speech — VAD must not interfere.
+    original = [Cue(1, "Hi", 0.5, 2.0)]
+    aligned = [Cue(1, "Hi", 1.2, 2.0)]
     search = [{"text": "Hi", "start": 0.25, "end": 2.5}]
     speech_spans = [(1.2, 2.0)]
+    fixed = _clamp_refine_starts(
+        original,
+        aligned,
+        search_segments=search,
+        speech_spans=speech_spans,
+    )
+    assert fixed[0].start == pytest.approx(1.2)
+
+
+def test_clamp_refine_starts_does_not_snap_past_original_for_soft_onset():
+    from sub_align.align import _clamp_refine_starts
+    from sub_align.models import Cue
+
+    # Soft onset at orig/FA; energy VAD only sees a louder mid-phrase peak.
+    original = [Cue(1, "The quick brown fox", 15.712, 18.654)]
+    aligned = [Cue(1, "The quick brown fox", 15.712, 18.647)]
+    search = [{"text": "The quick brown fox", "start": 15.462, "end": 19.154}]
+    speech_spans = [(16.090, 16.340), (17.270, 18.000)]
+    fixed = _clamp_refine_starts(
+        original,
+        aligned,
+        search_segments=search,
+        speech_spans=speech_spans,
+    )
+    assert fixed[0].start == pytest.approx(15.712)
+
+
+def test_clamp_refine_starts_snaps_forward_only_up_to_original():
+    from sub_align.align import _clamp_refine_starts
+    from sub_align.models import Cue
+
+    # FA earlier into silence; speech island between FA and orig — snap there.
+    original = [Cue(1, "Hi", 2.0, 3.0)]
+    aligned = [Cue(1, "Hi", 0.5, 3.0)]
+    search = [{"text": "Hi", "start": 0.25, "end": 3.5}]
+    speech_spans = [(1.2, 1.5)]  # before orig; orig itself also "silence"
     fixed = _clamp_refine_starts(
         original,
         aligned,
@@ -1518,6 +1581,28 @@ def test_prefer_original_short_cues_ignores_untimed():
     fixed = _prefer_original_short_cues(original, aligned)
     assert fixed[0].start == pytest.approx(1.0)
     assert fixed[0].end == pytest.approx(1.2)
+
+
+def test_prefer_original_short_cues_keeps_start_when_fa_later():
+    from sub_align.align import _prefer_original_short_cues
+    from sub_align.models import Cue
+
+    original = [Cue(1, "Okay.", 24.277, 24.637)]
+    aligned = [Cue(1, "Okay.", 24.296, 24.616)]
+    fixed = _prefer_original_short_cues(original, aligned)
+    assert fixed[0].start == pytest.approx(24.277)
+    assert fixed[0].end == pytest.approx(24.616)
+
+
+def test_prefer_original_short_cues_keeps_fa_when_earlier():
+    from sub_align.align import _prefer_original_short_cues
+    from sub_align.models import Cue
+
+    original = [Cue(1, "Okay.", 24.277, 24.637)]
+    aligned = [Cue(1, "Okay.", 24.200, 24.616)]
+    fixed = _prefer_original_short_cues(original, aligned)
+    assert fixed[0].start == pytest.approx(24.200)
+    assert fixed[0].end == pytest.approx(24.616)
 
 
 def test_repair_collapsed_cues_restores_original():

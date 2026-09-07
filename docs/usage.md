@@ -138,8 +138,10 @@ search windows (later overlap trim / word remap still apply).
 
 **`--offset` / `--no-auto-offset`** — Prefer `--offset` when you already know the
 global delay (faster, no ASR). Prefer `--no-auto-offset` when the track is
-mostly right or ASR would be unreliable. Leave the default for typical
-whole-track drift.
+mostly right or ASR would be unreliable (auto-offset can still mis-estimate on
+already-aligned ASR SRTs). Leave the default for typical whole-track drift.
+On refine, FA corrects local drift; VAD only blocks starts pulled earlier into
+silence — see [pipeline.md](pipeline.md).
 
 **`--trim-start` / `--trim-end`** — Script or subs start at the “content”
 while media has an intro/outro. Output times remain on the original media clock.

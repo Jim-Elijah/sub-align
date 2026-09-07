@@ -1,0 +1,13 @@
+1
+00:00:01,000 --> 00:00:06,200
+- Where are you going?
+- I'm going home now.
+
+2
+00:00:07,500 --> 00:00:13,800
+- Can you wait a minute?
+- No, I really have to leave.
+
+3
+00:00:15,000 --> 00:00:18,000
+- Fine. See you tomorrow.

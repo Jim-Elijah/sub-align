@@ -16,7 +16,9 @@ alignment algorithm itself, see [pipeline.md](pipeline.md).
 | Podcast intro not in the script | `--trim-start` / `--trim-end` |
 
 Always pass `--language` (or `--detect-language`). Text must roughly match
-speech when aligning a subtitle file.
+speech when aligning a subtitle file. For known accuracy trade-offs (short cues,
+refine drift, VAD, no diarization), see
+[pipeline.md § Limitations](pipeline.md#limitations).
 
 ---
 

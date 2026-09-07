@@ -1,0 +1,613 @@
+{
+  "meta": {
+    "media": "/home/jim/sub-align/tests/fixtures/clip1_timed.wav",
+    "media_name": "clip1_timed.wav",
+    "language": "en",
+    "model": "tiny",
+    "device": "cuda",
+    "compute_type": "float16",
+    "sample_rate": 16000,
+    "duration_s": 42.5,
+    "batch_size": 16,
+    "note": "asr = whisper model.transcribe(); asr_aligned = whisperx.align(asr segments). Replay these in tests instead of calling WhisperX."
+  },
+  "asr": {
+    "language": "en",
+    "segments": [
+      {
+        "text": " Hello. All right, that's it. We need more time to finish the work today. Yes. The quick brown fox jumps over the lazy dog near the river. Okay. Please wait here until I come back.",
+        "start": 1.685,
+        "end": 27.959,
+        "avg_logprob": -0.07556423279974196
+      },
+      {
+        "text": " 1 2 3. That's all for now.",
+        "start": 32.178,
+        "end": 39.164,
+        "avg_logprob": -0.2663352272727273
+      }
+    ]
+  },
+  "asr_aligned": {
+    "segments": [
+      {
+        "start": 1.725,
+        "end": 2.125,
+        "text": " Hello.",
+        "words": [
+          {
+            "word": "Hello.",
+            "start": 1.725,
+            "end": 2.125,
+            "score": 0.898
+          }
+        ],
+        "avg_logprob": -0.07556423279974196
+      },
+      {
+        "start": 3.706,
+        "end": 4.847,
+        "text": "All right, that's it.",
+        "words": [
+          {
+            "word": "All",
+            "start": 3.706,
+            "end": 3.846,
+            "score": 0.836
+          },
+          {
+            "word": "right,",
+            "start": 3.886,
+            "end": 4.126,
+            "score": 0.823
+          },
+          {
+            "word": "that's",
+            "start": 4.366,
+            "end": 4.627,
+            "score": 0.849
+          },
+          {
+            "word": "it.",
+            "start": 4.727,
+            "end": 4.847,
+            "score": 0.677
+          }
+        ],
+        "avg_logprob": -0.07556423279974196
+      },
+      {
+        "start": 8.208,
+        "end": 10.17,
+        "text": "We need more time to finish the work today.",
+        "words": [
+          {
+            "word": "We",
+            "start": 8.208,
+            "end": 8.309,
+            "score": 0.982
+          },
+          {
+            "word": "need",
+            "start": 8.349,
+            "end": 8.509,
+            "score": 0.862
+          },
+          {
+            "word": "more",
+            "start": 8.549,
+            "end": 8.729,
+            "score": 0.626
+          },
+          {
+            "word": "time",
+            "start": 8.789,
+            "end": 9.009,
+            "score": 0.854
+          },
+          {
+            "word": "to",
+            "start": 9.049,
+            "end": 9.129,
+            "score": 0.678
+          },
+          {
+            "word": "finish",
+            "start": 9.189,
+            "end": 9.469,
+            "score": 0.868
+          },
+          {
+            "word": "the",
+            "start": 9.509,
+            "end": 9.589,
+            "score": 0.834
+          },
+          {
+            "word": "work",
+            "start": 9.629,
+            "end": 9.809,
+            "score": 0.859
+          },
+          {
+            "word": "today.",
+            "start": 9.849,
+            "end": 10.17,
+            "score": 0.773
+          }
+        ],
+        "avg_logprob": -0.07556423279974196
+      },
+      {
+        "start": 13.751,
+        "end": 14.092,
+        "text": "Yes.",
+        "words": [
+          {
+            "word": "Yes.",
+            "start": 13.751,
+            "end": 14.092,
+            "score": 0.9
+          }
+        ],
+        "avg_logprob": -0.07556423279974196
+      },
+      {
+        "start": 15.712,
+        "end": 18.654,
+        "text": "The quick brown fox jumps over the lazy dog near the river.",
+        "words": [
+          {
+            "word": "The",
+            "start": 15.712,
+            "end": 15.813,
+            "score": 0.991
+          },
+          {
+            "word": "quick",
+            "start": 15.853,
+            "end": 16.053,
+            "score": 0.801
+          },
+          {
+            "word": "brown",
+            "start": 16.093,
+            "end": 16.333,
+            "score": 0.92
+          },
+          {
+            "word": "fox",
+            "start": 16.393,
+            "end": 16.733,
+            "score": 0.946
+          },
+          {
+            "word": "jumps",
+            "start": 16.833,
+            "end": 17.093,
+            "score": 0.808
+          },
+          {
+            "word": "over",
+            "start": 17.133,
+            "end": 17.273,
+            "score": 0.868
+          },
+          {
+            "word": "the",
+            "start": 17.313,
+            "end": 17.393,
+            "score": 0.844
+          },
+          {
+            "word": "lazy",
+            "start": 17.413,
+            "end": 17.734,
+            "score": 0.936
+          },
+          {
+            "word": "dog",
+            "start": 17.774,
+            "end": 18.054,
+            "score": 0.913
+          },
+          {
+            "word": "near",
+            "start": 18.094,
+            "end": 18.234,
+            "score": 0.808
+          },
+          {
+            "word": "the",
+            "start": 18.274,
+            "end": 18.354,
+            "score": 0.866
+          },
+          {
+            "word": "river.",
+            "start": 18.394,
+            "end": 18.654,
+            "score": 0.84
+          }
+        ],
+        "avg_logprob": -0.07556423279974196
+      },
+      {
+        "start": 24.277,
+        "end": 24.637,
+        "text": "Okay.",
+        "words": [
+          {
+            "word": "Okay.",
+            "start": 24.277,
+            "end": 24.637,
+            "score": 0.736
+          }
+        ],
+        "avg_logprob": -0.07556423279974196
+      },
+      {
+        "start": 26.218,
+        "end": 27.839,
+        "text": "Please wait here until I come back.",
+        "words": [
+          {
+            "word": "Please",
+            "start": 26.218,
+            "end": 26.438,
+            "score": 0.791
+          },
+          {
+            "word": "wait",
+            "start": 26.498,
+            "end": 26.698,
+            "score": 0.907
+          },
+          {
+            "word": "here",
+            "start": 26.738,
+            "end": 26.918,
+            "score": 0.609
+          },
+          {
+            "word": "until",
+            "start": 26.978,
+            "end": 27.219,
+            "score": 0.803
+          },
+          {
+            "word": "I",
+            "start": 27.279,
+            "end": 27.359,
+            "score": 0.894
+          },
+          {
+            "word": "come",
+            "start": 27.399,
+            "end": 27.559,
+            "score": 0.924
+          },
+          {
+            "word": "back.",
+            "start": 27.599,
+            "end": 27.839,
+            "score": 0.885
+          }
+        ],
+        "avg_logprob": -0.07556423279974196
+      },
+      {
+        "start": 32.338,
+        "end": 35.781,
+        "text": " 1 2 3.",
+        "words": [
+          {
+            "word": "1",
+            "start": 32.338,
+            "end": 32.478,
+            "score": 0.495
+          },
+          {
+            "word": "2",
+            "start": 32.498,
+            "end": 34.12,
+            "score": 0.939
+          },
+          {
+            "word": "3.",
+            "start": 34.14,
+            "end": 35.781,
+            "score": 0.839
+          }
+        ],
+        "avg_logprob": -0.2663352272727273
+      },
+      {
+        "start": 38.203,
+        "end": 39.064,
+        "text": "That's all for now.",
+        "words": [
+          {
+            "word": "That's",
+            "start": 38.203,
+            "end": 38.463,
+            "score": 0.878
+          },
+          {
+            "word": "all",
+            "start": 38.503,
+            "end": 38.624,
+            "score": 0.831
+          },
+          {
+            "word": "for",
+            "start": 38.664,
+            "end": 38.804,
+            "score": 0.815
+          },
+          {
+            "word": "now.",
+            "start": 38.844,
+            "end": 39.064,
+            "score": 0.994
+          }
+        ],
+        "avg_logprob": -0.2663352272727273
+      }
+    ],
+    "word_segments": [
+      {
+        "word": "Hello.",
+        "start": 1.725,
+        "end": 2.125,
+        "score": 0.898
+      },
+      {
+        "word": "All",
+        "start": 3.706,
+        "end": 3.846,
+        "score": 0.836
+      },
+      {
+        "word": "right,",
+        "start": 3.886,
+        "end": 4.126,
+        "score": 0.823
+      },
+      {
+        "word": "that's",
+        "start": 4.366,
+        "end": 4.627,
+        "score": 0.849
+      },
+      {
+        "word": "it.",
+        "start": 4.727,
+        "end": 4.847,
+        "score": 0.677
+      },
+      {
+        "word": "We",
+        "start": 8.208,
+        "end": 8.309,
+        "score": 0.982
+      },
+      {
+        "word": "need",
+        "start": 8.349,
+        "end": 8.509,
+        "score": 0.862
+      },
+      {
+        "word": "more",
+        "start": 8.549,
+        "end": 8.729,
+        "score": 0.626
+      },
+      {
+        "word": "time",
+        "start": 8.789,
+        "end": 9.009,
+        "score": 0.854
+      },
+      {
+        "word": "to",
+        "start": 9.049,
+        "end": 9.129,
+        "score": 0.678
+      },
+      {
+        "word": "finish",
+        "start": 9.189,
+        "end": 9.469,
+        "score": 0.868
+      },
+      {
+        "word": "the",
+        "start": 9.509,
+        "end": 9.589,
+        "score": 0.834
+      },
+      {
+        "word": "work",
+        "start": 9.629,
+        "end": 9.809,
+        "score": 0.859
+      },
+      {
+        "word": "today.",
+        "start": 9.849,
+        "end": 10.17,
+        "score": 0.773
+      },
+      {
+        "word": "Yes.",
+        "start": 13.751,
+        "end": 14.092,
+        "score": 0.9
+      },
+      {
+        "word": "The",
+        "start": 15.712,
+        "end": 15.813,
+        "score": 0.991
+      },
+      {
+        "word": "quick",
+        "start": 15.853,
+        "end": 16.053,
+        "score": 0.801
+      },
+      {
+        "word": "brown",
+        "start": 16.093,
+        "end": 16.333,
+        "score": 0.92
+      },
+      {
+        "word": "fox",
+        "start": 16.393,
+        "end": 16.733,
+        "score": 0.946
+      },
+      {
+        "word": "jumps",
+        "start": 16.833,
+        "end": 17.093,
+        "score": 0.808
+      },
+      {
+        "word": "over",
+        "start": 17.133,
+        "end": 17.273,
+        "score": 0.868
+      },
+      {
+        "word": "the",
+        "start": 17.313,
+        "end": 17.393,
+        "score": 0.844
+      },
+      {
+        "word": "lazy",
+        "start": 17.413,
+        "end": 17.734,
+        "score": 0.936
+      },
+      {
+        "word": "dog",
+        "start": 17.774,
+        "end": 18.054,
+        "score": 0.913
+      },
+      {
+        "word": "near",
+        "start": 18.094,
+        "end": 18.234,
+        "score": 0.808
+      },
+      {
+        "word": "the",
+        "start": 18.274,
+        "end": 18.354,
+        "score": 0.866
+      },
+      {
+        "word": "river.",
+        "start": 18.394,
+        "end": 18.654,
+        "score": 0.84
+      },
+      {
+        "word": "Okay.",
+        "start": 24.277,
+        "end": 24.637,
+        "score": 0.736
+      },
+      {
+        "word": "Please",
+        "start": 26.218,
+        "end": 26.438,
+        "score": 0.791
+      },
+      {
+        "word": "wait",
+        "start": 26.498,
+        "end": 26.698,
+        "score": 0.907
+      },
+      {
+        "word": "here",
+        "start": 26.738,
+        "end": 26.918,
+        "score": 0.609
+      },
+      {
+        "word": "until",
+        "start": 26.978,
+        "end": 27.219,
+        "score": 0.803
+      },
+      {
+        "word": "I",
+        "start": 27.279,
+        "end": 27.359,
+        "score": 0.894
+      },
+      {
+        "word": "come",
+        "start": 27.399,
+        "end": 27.559,
+        "score": 0.924
+      },
+      {
+        "word": "back.",
+        "start": 27.599,
+        "end": 27.839,
+        "score": 0.885
+      },
+      {
+        "word": "1",
+        "start": 32.338,
+        "end": 32.478,
+        "score": 0.495
+      },
+      {
+        "word": "2",
+        "start": 32.498,
+        "end": 34.12,
+        "score": 0.939
+      },
+      {
+        "word": "3.",
+        "start": 34.14,
+        "end": 35.781,
+        "score": 0.839
+      },
+      {
+        "word": "That's",
+        "start": 38.203,
+        "end": 38.463,
+        "score": 0.878
+      },
+      {
+        "word": "all",
+        "start": 38.503,
+        "end": 38.624,
+        "score": 0.831
+      },
+      {
+        "word": "for",
+        "start": 38.664,
+        "end": 38.804,
+        "score": 0.815
+      },
+      {
+        "word": "now.",
+        "start": 38.844,
+        "end": 39.064,
+        "score": 0.994
+      }
+    ]
+  }
+}

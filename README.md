@@ -26,8 +26,10 @@ audio:
 | `.txt` script | ASR only for search windows → forced-align **original lines** |
 | `.srt` / `.lrc` | Optional global offset → expand windows by `--margin` → forced-align |
 
-**Limitation:** subtitle text must roughly match spoken content. Alignment does
-not translate or correct wrong words.
+**Limitations:** subtitle text must roughly match spoken content (no
+translation). Refine can still nudge already-good cues; very short lines may be
+merged with neighbors for alignment; there is no speaker diarization. See
+[docs/pipeline.md § Limitations](docs/pipeline.md#limitations).
 
 More detail: [docs/pipeline.md](docs/pipeline.md) · scenarios & flags:
 [docs/usage.md](docs/usage.md)
@@ -65,6 +67,27 @@ uv sync --group dev --extra align   # full local alignment
 uv run pytest
 uv run ruff check src tests
 ```
+
+CI runs the same unit tests **without** the `align` extra. Path A/B/C coverage
+also uses checked-in fixtures under `tests/fixtures/` (timed WAVs + recorded
+WhisperX ASR/align JSON), replayed via mocks in `tests/test_fixture_replay.py`.
+
+To regenerate those fixtures locally (needs ffmpeg; recording needs WhisperX):
+
+```bash
+# 1) Timed TTS clips (clip 1 = main coverage, clip 2 = dash dialogue)
+uv run --with edge-tts --with numpy --with soundfile \
+  scripts/generate_clip1_tts.py --clip 1
+uv run --with edge-tts --with numpy --with soundfile \
+  scripts/generate_clip1_tts.py --clip 2
+
+# 2) Record ASR + word-align JSON for replay tests
+uv run --extra align scripts/record_whisperx_fixtures.py \
+  tests/fixtures/clip1_timed.wav tests/fixtures/clip2_timed.wav
+```
+
+Companion subtitle inputs (`clip1_script.txt`, `clip1_drift.srt`,
+`clip2_dialogue.srt`) live beside the WAVs; edit those if the cue sheet changes.
 
 ## Usage
 

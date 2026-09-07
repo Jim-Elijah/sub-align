@@ -1,0 +1,355 @@
+{
+  "meta": {
+    "media": "/home/jim/sub-align/tests/fixtures/clip2_timed.wav",
+    "media_name": "clip2_timed.wav",
+    "language": "en",
+    "model": "tiny",
+    "device": "cuda",
+    "compute_type": "float16",
+    "sample_rate": 16000,
+    "duration_s": 20.0,
+    "batch_size": 16,
+    "note": "asr = whisper model.transcribe(); asr_aligned = whisperx.align(asr segments). Replay these in tests instead of calling WhisperX."
+  },
+  "asr": {
+    "language": "en",
+    "segments": [
+      {
+        "text": " Where are you going? I'm going home now. Can you wait a minute? No, I really have to leave. Fine. See you tomorrow.",
+        "start": 1.195,
+        "end": 17.581,
+        "avg_logprob": -0.04025268414989114
+      }
+    ]
+  },
+  "asr_aligned": {
+    "segments": [
+      {
+        "start": 1.215,
+        "end": 2.035,
+        "text": " Where are you going?",
+        "words": [
+          {
+            "word": "Where",
+            "start": 1.215,
+            "end": 1.375,
+            "score": 0.809
+          },
+          {
+            "word": "are",
+            "start": 1.415,
+            "end": 1.515,
+            "score": 0.805
+          },
+          {
+            "word": "you",
+            "start": 1.555,
+            "end": 1.655,
+            "score": 0.78
+          },
+          {
+            "word": "going?",
+            "start": 1.695,
+            "end": 2.035,
+            "score": 0.773
+          }
+        ],
+        "avg_logprob": -0.04025268414989114
+      },
+      {
+        "start": 3.736,
+        "end": 4.596,
+        "text": "I'm going home now.",
+        "words": [
+          {
+            "word": "I'm",
+            "start": 3.736,
+            "end": 3.856,
+            "score": 0.853
+          },
+          {
+            "word": "going",
+            "start": 3.896,
+            "end": 4.116,
+            "score": 0.748
+          },
+          {
+            "word": "home",
+            "start": 4.156,
+            "end": 4.336,
+            "score": 0.733
+          },
+          {
+            "word": "now.",
+            "start": 4.396,
+            "end": 4.596,
+            "score": 0.92
+          }
+        ],
+        "avg_logprob": -0.04025268414989114
+      },
+      {
+        "start": 7.677,
+        "end": 8.538,
+        "text": "Can you wait a minute?",
+        "words": [
+          {
+            "word": "Can",
+            "start": 7.677,
+            "end": 7.797,
+            "score": 1.0
+          },
+          {
+            "word": "you",
+            "start": 7.837,
+            "end": 7.937,
+            "score": 0.987
+          },
+          {
+            "word": "wait",
+            "start": 7.977,
+            "end": 8.138,
+            "score": 0.79
+          },
+          {
+            "word": "a",
+            "start": 8.178,
+            "end": 8.198,
+            "score": 1.0
+          },
+          {
+            "word": "minute?",
+            "start": 8.238,
+            "end": 8.538,
+            "score": 0.843
+          }
+        ],
+        "avg_logprob": -0.04025268414989114
+      },
+      {
+        "start": 10.759,
+        "end": 12.279,
+        "text": "No, I really have to leave.",
+        "words": [
+          {
+            "word": "No,",
+            "start": 10.759,
+            "end": 10.979,
+            "score": 0.863
+          },
+          {
+            "word": "I",
+            "start": 11.219,
+            "end": 11.299,
+            "score": 0.997
+          },
+          {
+            "word": "really",
+            "start": 11.359,
+            "end": 11.619,
+            "score": 0.699
+          },
+          {
+            "word": "have",
+            "start": 11.659,
+            "end": 11.819,
+            "score": 0.909
+          },
+          {
+            "word": "to",
+            "start": 11.859,
+            "end": 11.939,
+            "score": 0.753
+          },
+          {
+            "word": "leave.",
+            "start": 11.999,
+            "end": 12.279,
+            "score": 0.888
+          }
+        ],
+        "avg_logprob": -0.04025268414989114
+      },
+      {
+        "start": 15.26,
+        "end": 15.6,
+        "text": "Fine.",
+        "words": [
+          {
+            "word": "Fine.",
+            "start": 15.26,
+            "end": 15.6,
+            "score": 0.868
+          }
+        ],
+        "avg_logprob": -0.04025268414989114
+      },
+      {
+        "start": 16.681,
+        "end": 17.441,
+        "text": "See you tomorrow.",
+        "words": [
+          {
+            "word": "See",
+            "start": 16.681,
+            "end": 16.821,
+            "score": 0.975
+          },
+          {
+            "word": "you",
+            "start": 16.841,
+            "end": 16.961,
+            "score": 0.915
+          },
+          {
+            "word": "tomorrow.",
+            "start": 17.001,
+            "end": 17.441,
+            "score": 0.856
+          }
+        ],
+        "avg_logprob": -0.04025268414989114
+      }
+    ],
+    "word_segments": [
+      {
+        "word": "Where",
+        "start": 1.215,
+        "end": 1.375,
+        "score": 0.809
+      },
+      {
+        "word": "are",
+        "start": 1.415,
+        "end": 1.515,
+        "score": 0.805
+      },
+      {
+        "word": "you",
+        "start": 1.555,
+        "end": 1.655,
+        "score": 0.78
+      },
+      {
+        "word": "going?",
+        "start": 1.695,
+        "end": 2.035,
+        "score": 0.773
+      },
+      {
+        "word": "I'm",
+        "start": 3.736,
+        "end": 3.856,
+        "score": 0.853
+      },
+      {
+        "word": "going",
+        "start": 3.896,
+        "end": 4.116,
+        "score": 0.748
+      },
+      {
+        "word": "home",
+        "start": 4.156,
+        "end": 4.336,
+        "score": 0.733
+      },
+      {
+        "word": "now.",
+        "start": 4.396,
+        "end": 4.596,
+        "score": 0.92
+      },
+      {
+        "word": "Can",
+        "start": 7.677,
+        "end": 7.797,
+        "score": 1.0
+      },
+      {
+        "word": "you",
+        "start": 7.837,
+        "end": 7.937,
+        "score": 0.987
+      },
+      {
+        "word": "wait",
+        "start": 7.977,
+        "end": 8.138,
+        "score": 0.79
+      },
+      {
+        "word": "a",
+        "start": 8.178,
+        "end": 8.198,
+        "score": 1.0
+      },
+      {
+        "word": "minute?",
+        "start": 8.238,
+        "end": 8.538,
+        "score": 0.843
+      },
+      {
+        "word": "No,",
+        "start": 10.759,
+        "end": 10.979,
+        "score": 0.863
+      },
+      {
+        "word": "I",
+        "start": 11.219,
+        "end": 11.299,
+        "score": 0.997
+      },
+      {
+        "word": "really",
+        "start": 11.359,
+        "end": 11.619,
+        "score": 0.699
+      },
+      {
+        "word": "have",
+        "start": 11.659,
+        "end": 11.819,
+        "score": 0.909
+      },
+      {
+        "word": "to",
+        "start": 11.859,
+        "end": 11.939,
+        "score": 0.753
+      },
+      {
+        "word": "leave.",
+        "start": 11.999,
+        "end": 12.279,
+        "score": 0.888
+      },
+      {
+        "word": "Fine.",
+        "start": 15.26,
+        "end": 15.6,
+        "score": 0.868
+      },
+      {
+        "word": "See",
+        "start": 16.681,
+        "end": 16.821,
+        "score": 0.975
+      },
+      {
+        "word": "you",
+        "start": 16.841,
+        "end": 16.961,
+        "score": 0.915
+      },
+      {
+        "word": "tomorrow.",
+        "start": 17.001,
+        "end": 17.441,
+        "score": 0.856
+      }
+    ]
+  }
+}

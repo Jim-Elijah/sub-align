@@ -146,6 +146,34 @@ Forced alignment is **not** machine translation. If the script disagrees with
 what was spoken, timestamps may still attach to the wrong audio; fix the text
 or use the audio-only path.
 
+## Limitations
+
+Honest constraints of the current pipeline (not a full bug list):
+
+- **Text must match speech.** Alignment does not translate, paraphrase, or
+  correct wrong words; mismatched text can still get confident but wrong times.
+- **Refine can move already-good cues.** `.srt` / `.lrc` refine searches within
+  `--margin` (start lead-in is capped smaller than the end pad). Forced
+  alignment may still nudge boundaries; a second pass often keeps a stable
+  (including stably wrong) result.
+- **Short cues are fragile.** Cues with ≤3 alphanumeric tokens may be
+  temporarily merged with neighbors for WhisperX, then split back via word
+  remapping. Boundaries after remap can be imperfect; refine may prefer the
+  original short span when FA collapses it.
+- **Multi-line dialogue is heuristic, not diarization.** Lines like
+  `-A` / `-B` / `-C` are temporarily split for FA on refine, then merged into
+  one cue. There is no speaker ID model; cues that mix speakers without that
+  dash pattern stay one align unit.
+- **VAD is approximate.** Energy VAD (used to narrow `.txt` windows and to
+  clamp refine starts out of silence) can miss soft speech or pick the wrong
+  island in noisy / music-heavy audio.
+- **Auto-offset needs enough matches.** Global offset estimation needs several
+  cue↔ASR token hits and ignores tiny drift; weak ASR or sparse dialogue can
+  yield `0` or a poor shift — use `--offset` / `--no-auto-offset` when you know
+  better.
+- **Formats.** `.lrc` ends are inferred from the next start; ASS/SSA and true
+  multi-track / styled dialogue are not supported.
+
 ## Code map
 
 | Area | Location |
